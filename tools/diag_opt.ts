@@ -10,11 +10,11 @@ const html = `<body style="margin:0;background:#fff"><div class="opt" style="wid
 const url = `data:text/html,${encodeURIComponent(html)}`
 console.log("arch", process.arch, os.release(), "chrome", chromePath())
 
-for (let i = 0; i < 3; i++) {
+async function plain() { for (let i = 0; i < 1; i++) {
   const t = Date.now()
   try { const s = await pictures({ url, width: 640, height: 400, selector: ".opt" }); console.log(`pictures #${i} ok ${s.length} in ${Date.now() - t} ms`) }
   catch (e) { console.log(`pictures #${i} FAILED in ${Date.now() - t} ms: ${(e as Error).message}`) }
-}
+} }
 
 async function traced(label: string, extra: string[], target: string) {
   console.log(`\n=== ${label}`)
@@ -50,7 +50,7 @@ async function traced(label: string, extra: string[], target: string) {
     await send("Emulation.setDeviceMetricsOverride", { width: 640, height: 400, deviceScaleFactor: 2, mobile: false })
     await send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] })
     console.log(at(), "navigate", JSON.stringify(await send("Page.navigate", { url: target })))
-    for (let i = 0; i < 160; i++) {
+    for (let i = 0; i < 100; i++) {
       const r = await send("Runtime.evaluate", { expression: `JSON.stringify([document.URL.slice(0, 24), document.readyState, document.visibilityState, document.querySelectorAll(".opt").length, [...document.querySelectorAll(".opt")].map((e) => e.getBoundingClientRect().width), document.documentElement.outerHTML.length, innerWidth, innerHeight])`, returnByValue: true })
       console.log(at(), "poll", JSON.stringify(r).slice(0, 200))
       if (i > 12 && /\[200,300\]/.test(JSON.stringify(r))) break
@@ -63,5 +63,6 @@ async function traced(label: string, extra: string[], target: string) {
   }
 }
 await traced("as headless.ts launches", [], url)
-await traced("as headless.ts launches, a second time", [], url)
 await traced("no sandbox", ["--no-sandbox"], url)
+await traced("http page", [], "https://example.com/")
+await plain()
