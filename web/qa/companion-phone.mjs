@@ -48,7 +48,7 @@ const seen = (page) => page.evaluate(() => {
     barTop: bar ? Math.round(bar.top) : innerHeight, width: innerWidth }
 })
 const lineBox = (page, text) => page.locator(".cm-line", { hasText: text }).first().boundingBox()
-const arrived = (page, sel) => page.locator(sel).first().evaluate((e) => Promise.all(e.getAnimations().map((a) => a.finished)))
+const arrived = (page, sel) => page.locator(sel).first().evaluate((e) => Promise.all(e.getAnimations().map((a) => a.finished.catch(() => {}))))
 const frame = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r())))
 const near = (caret, box) => !!caret && !!box && caret.y >= box.y - 4 && caret.y + caret.h <= box.y + box.height + 4
 

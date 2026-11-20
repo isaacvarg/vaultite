@@ -9,7 +9,7 @@ import fs from "node:fs"
 import http from "node:http"
 import os from "node:os"
 import path from "node:path"
-import { ROOT, qa, until } from "./lib/qa.mjs"
+import { ROOT, pageNotLastScreen, qa, until } from "./lib/qa.mjs"
 
 const { args: [VAULT], check, errs, watch, done } = await qa(import.meta.url, { chrome: false })
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "vau-webicons-"))
@@ -58,7 +58,7 @@ const launch = async () => {
     executablePath: path.join(ROOT, "node_modules/.bin/electron"), args: [ROOT, "--vault", VAULT],
     env: { ...process.env, VAULTITE_QUIET: "1", VAULTITE_USER_DATA: USER_DATA, VAULTITE_LOCAL: path.join(TMP, "local") },
   })
-  const win = await app.firstWindow()
+  const win = await pageNotLastScreen(app)
   watch(win, { console: true, fail: false })
   await win.waitForSelector("[role=tree]", { timeout: 60000 })
   return { app, win, origin: new URL(win.url()).origin }

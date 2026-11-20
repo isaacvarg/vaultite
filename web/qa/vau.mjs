@@ -73,8 +73,8 @@ try {
   check("vau command runs a palette command (the sidebar folds)", code === 0 && await until(async () => (await side()) !== open), out)
   vau("command", "sidebar:toggle")
 
-  ;[code, out] = vau("open", "x.md", "--split", "left")
-  check("a bad --split is refused, as a mistyped command line", code === 2 && out.includes("right or down"), out)
+  ;[code, out] = vau("open", "x.md", "--split", "sideways")
+  check("a bad --split is refused, as a mistyped command line", code === 2 && out.includes("--split: should be right, left, down or up"), out)
   await a.close(); await b.close()
   await wait(500)
   ;[code, out] = vau("open", "Dashboards/Today.md")

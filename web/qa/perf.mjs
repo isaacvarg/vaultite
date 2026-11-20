@@ -330,7 +330,8 @@ async function interactions(B, page, cdp, net, phone, subjects) {
   await page.waitForFunction(() => [...document.querySelectorAll("h1")].some((h) => h.textContent.trim() === "People"))
   await settle(page, net, 300)
   const person = await page.evaluate(() => {
-    const b = [...document.querySelectorAll('[class~="@container"] button')].find((x) => x.textContent.trim().length > 2 && x.querySelector("svg") && x.closest(".grid"))
+    const drawnNotInAKeptTab = (x) => x.getClientRects().length > 0
+    const b = [...document.querySelectorAll('[class~="@container"] button')].find((x) => x.textContent.trim().length > 2 && x.querySelector("svg") && x.closest(".grid") && drawnNotInAKeptTab(x))
     if (!b) return null
     b.setAttribute("data-perf-person", "")
     return b.querySelector(".line-clamp-2")?.textContent.trim() ?? null

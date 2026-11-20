@@ -21,8 +21,8 @@ const server = http.createServer((req, res) => {
   if (u.pathname === "/file.txt") { res.writeHead(200, { "Content-Type": "text/plain", "Content-Disposition": "attachment; filename=\"log book.txt\"" }); return res.end("Day one: calm.\n") }
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" })
   if (u.pathname === "/upload") {
-    return res.end(`<!doctype html><title>Upload</title><label>Document <input type="file" id="doc"></label><p id="got">none</p><a href="/file.txt">The log book</a>
-<script>doc.onchange = () => { got.textContent = "Picked " + doc.files[0].name + ", " + doc.files[0].size + " bytes" }; window.secretOfThePage = 42</script>`)
+    return res.end(`<!doctype html><title>Upload</title><label>Document <input type="file" id="doc"></label><p id="got">none</p><div><button id="img">Add image</button><input type="file" id="pic" hidden></div><p id="got2">none</p><a href="/file.txt">The log book</a>
+<script>doc.onchange = () => { got.textContent = "Picked " + doc.files[0].name + ", " + doc.files[0].size + " bytes" }; img.onclick = () => pic.click(); pic.onchange = () => { got2.textContent = "Image " + pic.files[0].name }; window.secretOfThePage = 42</script>`)
   }
   if (u.pathname === "/menu") {
     return res.end(`<!doctype html><title>Menu</title><h1>Menu</h1><button id="save">Save</button><div id="out"></div>
@@ -256,6 +256,8 @@ const snap3 = text(await mcp.tool("browser_snapshot", { tab: t2 }))
 const fileRef = /button "Document" \[ref=(e\d+)\]/.exec(snap3)?.[1] ?? /\[ref=(e\d+)\]/.exec(snap3)?.[1]
 const up = await mcp.tool("browser_act", { tab: t2, action: "upload", ref: fileRef, files: ["Attachments/cv.txt"] })
 check("MCP: a vault file uploaded into a file input", !up.isError && await until(async () => /Picked cv\.txt, 20 bytes/.test(text(await mcp.tool("browser_read", { tab: t2 }))), 5000), [text(up), snap3])
+const upHidden = await mcp.tool("browser_act", { tab: t2, action: "upload", ref: /button "Add image" \[ref=(e\d+)\]/.exec(snap3)?.[1], files: ["Attachments/cv.txt"] })
+check("… or into the hidden one a site's own button opens", !upHidden.isError && await until(async () => /Image cv\.txt/.test(text(await mcp.tool("browser_read", { tab: t2 }))), 5000), [text(upHidden), snap3])
 const ev = await mcp.tool("browser_evaluate", { tab: t2, expression: "({ title: document.title, page: typeof window.secretOfThePage })" })
 check("MCP: an expression in its own world: the DOM, not the page's scripts", text(ev) === '{"title":"Upload","page":"undefined"}', text(ev))
 const linkRef = /link "The log book"(?: \(→ [^)]*\))? \[ref=(e\d+)\]/.exec(text(await mcp.tool("browser_snapshot", { tab: t2 })))?.[1]

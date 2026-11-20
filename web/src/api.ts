@@ -10,6 +10,7 @@ export {
 } from "@/core/data"
 export { statusOf, type Live } from "@/core/liveread"
 export { appDevice, del, get, op, patch, post, put } from "@/core/http"
+export { whenIdle } from "@/core/firstscreen"
 /** A shared folder's guest (plugins/core/share), when this app is theirs: their name, role and folder; else null. */
 export { guestEdits, share, type Share } from "@/core/share"
 /** A note typed in together now (a plugin's live session): its editors' autosave stands down while the server keeps it. */
@@ -114,7 +115,7 @@ export { agentOfTerminal, agentsOn, askAbout, iconNamed, pinOfView, resolveView,
 export { parseTerminal, type TerminalAgent } from "../../core/terminalids.ts"
 // Plugins' colours (--<id>), which an artifact gets too (as --vau-<id>).
 export { editorMenuItems, pluginEditorExtensions, tintNames, webContainers, webPageActions } from "@/core/plugins"
-export { blockFor, fileRowsChanged, kindFolder, offText, pluginById, tabButtons } from "@/core/plugins"
+export { blockFor, fileRowsChanged, kindFolder, offText, pluginById, tabButtons, usePluginsVersion } from "@/core/plugins"
 export { besideActive, newNoteFolder } from "@/core/conventions"
 // How a file looks where it's listed (its `icon:` and `tint:`, or its plugin's), and pages:
 // a file a plugin draws as one (a dashboard).
@@ -226,7 +227,7 @@ export { TryAgain } from "@/components/TryAgain"
 export { Banner } from "@/components/Banner"
 // A cursor's conversation: its last words and what the user asked, above a box to ask more (the window's and the screen's).
 export { Chat, type ChatItem } from "@/components/Chat"
-export { Badged, Bar, Bars, Editable, IconAction, Empty, FilterField, Foldable, Group, GroupNote, KV, List, Loading, LoadingRows, OnThisMac, PageHeader, Panel, Ring, Row, Section, Segmented, SettingRow, SheetHead, Slider, Stat, Stone, type Dot } from "@/components/kit"
+export { Arriving, Badged, Bar, Bars, Editable, IconAction, Empty, FilterField, Foldable, Group, GroupNote, KV, List, Loading, LoadingRows, OnThisMac, PageHeader, Panel, Ring, Row, Section, Segmented, SettingRow, SheetHead, Slider, Stat, Stone, type Dot } from "@/components/kit"
 export { Switch } from "@/components/Switch"
 // A place in the app's chrome a view draws into (a portal's host: #phone-actions, #phone-subtitle), once it's there.
 export { usePortalHost } from "@/components/kit"

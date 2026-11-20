@@ -30,6 +30,7 @@ import { SPLITS } from "./splitto.ts"
 import { propTypeOps } from "./coreops/proptypes.ts"
 import { topic, topics } from "./docs.ts"
 import { defineOp, type Op, OpError, quoted } from "./ops.ts"
+import { brief } from "./words.ts"
 import { isOutside } from "./fileprops.ts"
 import { allowPath } from "./outside.ts"
 
@@ -56,7 +57,7 @@ function opsOps(app: App): Op[] {
         .map(({ id, plugin, summary, kind, cli, mcp }) => ({ id, plugin, summary, kind, cli, mcp }))
     },
     text: (rows) => rows.length
-      ? rows.map((r) => `- \`${r.id}\`${r.cli ? ` (vau ${r.cli})` : ""}: ${r.summary}`).join("\n") + "\n\n`vau <id> --help` explains one."
+      ? rows.map((r) => `- \`${r.id}\`${r.cli ? ` (vau ${r.cli})` : ""}: ${brief(r.summary)}`).join("\n") + "\n\n`vau <id> --help` explains one."
       : "No operation matches.",
   })]
 }

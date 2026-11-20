@@ -11,9 +11,9 @@ import { stopRuns, type Recipe, type Root, type RootStore } from "../core/update
 import type { Applied, Update, UpdaterOptions } from "../core/update/updater.ts"
 import { BRANCH, CODE, HOST, SHELL } from "./identity.ts"
 import { mainLog } from "./mainlog.ts"
-import { SHA, type StoreHost, userData } from "./storehost.ts"
+import { compileCache, SHA, type StoreHost, userData } from "./storehost.ts"
 import { shellBad, shellBuiltAt } from "./filewire.ts"
-import { policyFor, SHELL_EVERY, storeDir } from "./storepolicy.ts"
+import { policyFor, SHELL_EVERY, storeDir, trimCompileCache } from "./storepolicy.ts"
 import { messageOf } from "./browser/messageof.ts"
 import { isObj } from "../core/values.ts"
 import { atExit } from "../core/exit.ts"
@@ -161,4 +161,5 @@ export async function ready(h: StoreHost) {
     if (path.dirname(root) === path.join(store.dir, "roots") && SHA.test(c) && !store.bad(c)) store.markBad(c, `it didn't start: ${b.why}`)
   }
   setTimeout(() => void store.gc().catch((e) => h.log(`store: gc failed: ${errText(e)}`)), 70_000).unref()
+  void trimCompileCache(compileCache()).then((n) => { if (n) h.log(`store: the compile cache held ${n} entries: it starts again`) }, (e) => h.log(`store: the compile cache wasn't trimmed: ${errText(e)}`))
 }

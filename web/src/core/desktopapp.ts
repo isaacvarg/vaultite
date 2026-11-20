@@ -1,6 +1,7 @@
 import { desktop, hasFiles, spellingHeard, type DesktopApi, type MenuSnapshot } from "@/core/desktop"
 import { available, commandList, commandName, isCustom, isOn, isSetting, keysOf, onCommandsChanged, runCommandId, runCommandLink } from "@/core/commands"
 import { onSwitches } from "@/core/switches"
+import { onFirstScreen, whenIdle } from "@/core/firstscreen"
 import { getStore, onStore } from "@/core/data"
 import { get, post, upload as uploadFile } from "@/core/http"
 import { openFile } from "@/core/files"
@@ -9,7 +10,6 @@ import { dismissNotice, notify } from "@/core/notify"
 import { recentFiles, subscribeScoped, workspacePins } from "@/core/scope"
 import { safeToRestart } from "@/core/unsaved"
 import { panesShowing } from "@/core/workspace"
-import { whenIdle } from "@/lib/utils"
 import { elementOf } from "@/core/dom"
 import { strings } from "../../../core/values.ts"
 
@@ -84,6 +84,7 @@ const refresh = () => {
   listed = Date.now()
   listVaults().then((l) => { known = l.vaults.filter((v) => v.path !== l.current) }, () => { listed = 0 })
 }
+export const relistVaults = () => { listed = 0; refresh() }
 
 export function startDesktop() {
   const app = desktop
@@ -122,6 +123,7 @@ export function startDesktop() {
     }
   })
   app.ready().then((paths) => paths.forEach(open))
+  onFirstScreen(() => { void app.drawn?.() })
   if (app.syncMenu) syncMenu(app.syncMenu)
   addEventListener("dragover", (e) => {
     if (!hasFiles(e.dataTransfer)) return

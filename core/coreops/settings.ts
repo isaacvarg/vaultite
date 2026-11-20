@@ -3,12 +3,14 @@
 import { listSnippets, listThemes } from "../appearance.ts"
 import type { App } from "../app.ts"
 import { commandList, pageIcons, schemes } from "../appsource.ts"
-import { closest, COMMON, optionText } from "../blocks.ts"
+import { COMMON, optionText } from "../blocks.ts"
+import { closest } from "../spelling.ts"
 import { defineOp, jsonBlock, type Op, OpError } from "../ops.ts"
 import { lines } from "./common.ts"
 import type { Item } from "../vault.ts"
 import { strings } from "../values.ts"
 import { pluginList } from "./plugins.ts"
+import { VAULT_SETTINGS } from "../vaultname.ts"
 
 
 /** A text read as JSON when it is (numbers, true, lists), else the text. */
@@ -127,7 +129,7 @@ export function normalizeKeys(s: string) {
 
 /** The app's own settings files, .vaultite/<name>.json: what the app's state holds and its routes and ops may change
  *  (a plugin's data.json is plugin/<id>). */
-export const SETTINGS = ["appearance", "editor", "plugins", "sidebars", "newtab", "files", "folders", "pages", "hotkeys", "palette"]
+export const SETTINGS = ["appearance", "editor", "plugins", "sidebars", "newtab", "files", "folders", "pages", "hotkeys", "palette", VAULT_SETTINGS]
 /** The route of a settings file: config/<name>, or config/plugin/<id> (whose route keeps its `local` keys this machine's). */
 function settingsRoute(name: string) {
   const n = name.trim().replace(/^\.vaultite\//, "").replace(/\.json$/, "")
@@ -142,14 +144,14 @@ export function settingsOps(app: App): Op[] {
   return [defineOp({
     id: "settings.get",
     cli: "settings",
-    summary: "A settings file of the app (appearance, editor, plugins, sidebars, newtab, files, folders, pages, hotkeys, palette) or a plugin's (plugin/<id>), as JSON.",
+    summary: "A settings file of the app (appearance, editor, plugins, sidebars, newtab, files, folders, pages, hotkeys, palette, vault) or a plugin's (plugin/<id>), as JSON.",
     help: `The app's settings are files in the vault's .vaultite/ (vau docs app has every key); a plugin's are its
 .vaultite/plugins/<id>/data.json (vau docs <id> lists them). Unset keys are the app's defaults.
 
   vau settings appearance
   vau settings plugin/workspaces`,
     kind: "read",
-    params: { name: { type: "string", required: true, description: "appearance, editor, plugins, sidebars, newtab, files, folders, pages, hotkeys, palette, or plugin/<id>" } },
+    params: { name: { type: "string", required: true, description: "appearance, editor, plugins, sidebars, newtab, files, folders, pages, hotkeys, palette, vault, or plugin/<id>" } },
     args: ["name"],
     run: ({ name }, ctx) => ctx.api("GET", settingsRoute(name)),
     text: jsonBlock,
@@ -162,10 +164,11 @@ so nothing another device or app version wrote is lost; null removes a key. The 
 checked here: vau appearance and vau hotkey check theirs.
 
   vau settings set files '{"showHidden": true}'
+  vau settings set vault '{"name": "Lighthouse"}'
   vau settings set plugin/today '{"week_starts": "monday"}'`,
     kind: "write",
     params: {
-      name: { type: "string", required: true, description: "appearance, editor, plugins, sidebars, newtab, files, folders, pages, hotkeys, palette, or plugin/<id>" },
+      name: { type: "string", required: true, description: "appearance, editor, plugins, sidebars, newtab, files, folders, pages, hotkeys, palette, vault, or plugin/<id>" },
       values: { type: "object", required: true, description: "the keys to change and their new values (null removes one)" },
     },
     args: ["name", "values"],

@@ -8,7 +8,7 @@ import fs from "node:fs"
 import http from "node:http"
 import os from "node:os"
 import path from "node:path"
-import { ROOT, qa, until, wait } from "./lib/qa.mjs"
+import { ROOT, pageNotLastScreen, qa, until, wait } from "./lib/qa.mjs"
 import { encode } from "../../electron/browser/cbor.ts"
 import { totp, otpOf } from "../../electron/browser/keepass.ts"
 
@@ -322,7 +322,7 @@ check("no secret in the app's or the server's output", ![SECRET, HARBOR, ADMIN, 
 
 await app.close()
 const app2 = await launch()
-const win2 = await app2.firstWindow()
+const win2 = await pageNotLastScreen(app2)
 await win2.waitForSelector("[role=tree]", { timeout: 60000 })
 const after = await win2.evaluate(() => window.vaultite.web.engine("logins:status"))
 check(keyring ? "restarted: still set, from the keyring" : "restarted: locked, saying to type its password again", keyring

@@ -39,7 +39,7 @@ function FoldHeading({ label, fold, count }: { label: string; fold: NonNullable<
       className="group/fold mt-3 flex h-7 cursor-pointer items-center gap-1 rounded-[5px] px-1.5 text-[12px] font-semibold text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground">
       <span className="flex-1 text-left">{label}</span>
       {!fold.open && <span className="font-normal tabular-nums">{count}</span>}
-      <ChevronRight aria-hidden className={cn("size-3.5 shrink-0 transition-transform duration-150", fold.open && "rotate-90")} strokeWidth={2.5} />
+      <ChevronRight aria-hidden className={cn("size-3.5 shrink-0 transition-transform duration-(--motion-fast)", fold.open && "rotate-90")} strokeWidth={2.5} />
     </button>
   )
 }
@@ -74,7 +74,7 @@ export function RailMenu({ label, items, active, pick, tiles: tiled, chevrons, .
             {head}
             {!folded && (
               <SidebarRow icon={icon} tint={tiled ? undefined : it.tint} label={it.label} open active={active === it.id} aria-current={active === it.id ? "page" : undefined} onClick={() => pick(it.id)} {...it.attrs}>
-                {it.value && <span className="pr-0.5 text-[12px] text-muted-foreground tabular-nums">{it.value}</span>}
+                {it.value && <span className={cn("pr-0.5 text-[12px] tabular-nums", active === it.id ? "text-[color-mix(in_oklab,var(--muted-foreground),var(--foreground)_30%)]" : "text-muted-foreground")}>{it.value}</span>}
                 {chevrons && <ChevronRight aria-hidden className="size-4 shrink-0 text-tertiary" strokeWidth={2.5} />}
               </SidebarRow>
             )}

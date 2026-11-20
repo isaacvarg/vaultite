@@ -12,8 +12,7 @@ const log = logger("inbox")
 
 const WAKE = 30_000
 const toldBack = new Set<string>()
-export async function wake() {
-  const now = Date.now()
+export async function wake(now = Date.now()) {
   await holdEnds(now)
   if (holdNow(now)) return
   for (const old of list().filter((e) => e.snoozed && e.snoozed <= now)) {

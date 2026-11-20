@@ -1,5 +1,6 @@
 import fs from "node:fs"
 import path from "node:path"
+import { mock } from "node:test"
 import type { Any, VaultTest } from "./harness.ts"
 
 export default async ($: VaultTest) => {
@@ -53,7 +54,7 @@ export default async ($: VaultTest) => {
     await wait(() => !vault.waiting(), 10_000) // (a folder an area before deleted is let go of seconds later, walking)
     const sync = vault.sync
     let walks = 0
-    vault.sync = function () { walks++; return sync.call(this) }
+    vault.sync = function (...a) { walks++; return sync.apply(this, a) }
     await new Promise((r) => setTimeout(r, 300))
     await vault.synced()
     walks = 0
@@ -81,20 +82,70 @@ export default async ($: VaultTest) => {
     check("live: a change not in the index isn't vouched for", !vault.vouched())
     await vault.synced({ trusting: true })
     check("live: so the app's next read walks", walks >= 1, walks)
+    await vault.synced()
+    const settingsWere = vault.settingsVersion
     vault.setConfig("live-check", { on: true })
     check("live: a settings file the server writes isn't vouched for either (its state is old)", !vault.vouched())
     walks = 0
     await vault.synced({ trusting: true })
-    check("live: so after it, the app's next read walks (again if the watcher heard the write mid-walk)", walks >= 1, walks)
+    check("live: so after it, the app's next read reads the settings again, not every note", vault.settingsVersion > settingsWere && walks === 0, walks)
     vault.removeConfig("live-check")
     await new Promise((r) => setTimeout(r, 400)) // (what the watcher heard of that, passed on)
     await vault.synced()
-    ;(vault as Any).walked = Date.now() - 60_000 // (the last walk long ago: past the watcher's word alone)
+    vault.walked = Date.now() - 60_000
     walks = 0
     await vault.synced({ trusting: true })
     const answered = walks
     await wait(() => walks === 1)
     check("live: past that, the app's read is answered at once and a walk follows it", answered === 0 && walks === 1, [answered, walks])
+    {
+      const order: string[] = []
+      const look = vault.looked().then((l) => { order.push("look"); return l })
+      await vault.lock(() => { order.push("write") })
+      const pre = await look
+      check("live: a write goes ahead while a walk looks at the disk", order.join() === "write,look" && pre !== null, order)
+      write("Notes/Live early.md", "Seen by the look.\n")
+      const stale = await vault.looked()
+      await api("PUT", "file", { path: "Notes/Live late.md", text: "Written after the look.\n" })
+      await vault.lock(() => vault.sync(stale))
+      check("live: a look a write came after isn't used: what it wrote stays", vault.entries.has("Notes/Live late.md") && vault.entries.has("Notes/Live early.md"))
+      await new Promise((r) => setTimeout(r, 300))
+      await vault.synced()
+      const fresh = await vault.looked()
+      await vault.lock(() => vault.sync(fresh))
+      check("live: one nothing came after is used as it was", vault.walked === fresh?.t0, [vault.walked, fresh?.t0])
+      for (const f of ["early", "late"]) fs.rmSync(path.join(VAULT, `Notes/Live ${f}.md`))
+      await new Promise((r) => setTimeout(r, 300))
+      await vault.synced()
+    }
+    {
+      await vault.synced()
+      vault.downloading = ["Notes/Away.md"]
+      check("live: files iCloud is bringing down keep the index vouched for, and walked again on its own", vault.vouched() && vault.waiting())
+      vault.downloading = []
+    }
+    {
+      let saw = ""
+      const off = vault.afterSync((v) => { saw = v.doing }, "live-probe")
+      await vault.synced()
+      off()
+      check("live: what the vault's holder is doing is known, down to a plugin's hook", saw === "after a sync: live-probe" && vault.doing === "", [saw, vault.doing])
+    }
+    write(".vaultite/live-hand.json", '{"n":1}\n')
+    await vault.synced()
+    check("live: a settings file written by hand is read at the next walk", vault.config("live-hand").n === 1, vault.config("live-hand"))
+    await vault.synced()
+    const reads = mock.method(fs, "readFileSync")
+    vault.config("live-hand")
+    reads.mock.restore()
+    check("live: a walk that finds the settings as they were keeps what it read of them", reads.mock.callCount() === 0, reads.mock.callCount())
+    write(".vaultite/live-hand.json", '{"n":2, "more": true}\n')
+    await vault.synced()
+    check("live: and one changed by hand is read again", vault.config("live-hand").n === 2, vault.config("live-hand"))
+    vault.removeConfig("live-hand")
+    await new Promise((r) => setTimeout(r, 400))
+    await vault.synced()
+    await vault.synced()
     if (process.platform === "linux") {
       // Linux's watcher hears each change as it's made: an agent's read waits for what it heard, not for a walk.
       await vault.synced()

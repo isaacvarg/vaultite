@@ -111,7 +111,7 @@ const MONTH_DAY_YEAR = { ...MONTH_DAY, year: "numeric" } as const
 
 function DayTile({ date, tint }: { date: string; tint?: string }) {
   return (
-    <span role="img" aria-label={dateText(parse(date), MONTH_DAY)} className={cn("flex size-10 shrink-0 flex-col items-center justify-center rounded-[8px]", !tint && "bg-muted")}
+    <span role="img" aria-label={dateText(parse(date), MONTH_DAY)} className={cn("flex size-10 shrink-0 flex-col items-center justify-center rounded-[8px]", !tint && "bg-foreground/[0.05]")}
       style={tint ? { background: `color-mix(in srgb, ${tint} 14%, transparent)`, color: ink(tint) } : undefined}>
       <span className={cn("text-[10px] leading-[12px] font-semibold", !tint && "text-muted-foreground")}>{dateText(parse(date), MONTH)}</span>
       <span className="num text-[16px] leading-[18px] font-semibold">{Number(date.slice(8, 10))}</span>
@@ -172,7 +172,7 @@ export function PeopleGroup({ store, options }: BlockCtx) {
           return (
             <Row key={p.id} title={p.name} onOpen={open(p)} meta={meta} wrap
               right={<div className="flex items-center gap-3"><Dots s={store} p={p} />
-                <span className={cn("w-16 text-right", st.due && "font-medium")} style={st.due ? { color: TINT } : undefined}>{ago(st.since)}</span></div>} />
+                <span className={cn("w-16 text-right", st.due && "font-medium")} style={st.due ? { color: ink(TINT) } : undefined}>{ago(st.since)}</span></div>} />
           )
         })}
       </List>

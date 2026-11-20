@@ -1,13 +1,16 @@
 // npm test: every suite at once, each one's output printed as it ends, then which failed. node tools/test.ts [suite...]
 import "./test/isolate.ts" // (first: a run of its own, kept off the user's vaults)
 import { spawn } from "node:child_process"
+import { createRequire } from "node:module"
 import path from "node:path"
 
-const ALL = ["test_web", "test_vault", "test_vt", "test_pictures", "test_player", "test_kdbx", "test_sandbox", "test_setup", "test_shell", "test_selfupdate", "test_running", "test_updater", "test_store", "test_servicestore", "test_plan", "test_ci", "test_update", "test_closure", "test_lint", "test_stall", "test_slowmove", "test_hang", "test_desktophost", "test_serverwatch", "test_machines", "test_shared", "test_sync", "test_sync_live", "test_tours", "test_showsaid", "test_isolate", "test_qa_scripts", "perf/startup"]
+const ALL = ["test_web", "test_vault", "test_vt", "test_pictures", "test_player", "test_kdbx", "test_sandbox", "test_setup", "test_shell", "test_selfupdate", "test_running", "test_updater", "test_store", "test_servicestore", "test_plan", "test_ci", "test_update", "test_closure", "test_lint", "test_stall", "test_keptassets", "test_slowmove", "test_hang", "test_desktophost", "test_compilefill", "test_serverwatch", "test_machines", "test_shared", "test_sync", "test_sync_live", "test_tours", "test_showsaid", "test_isolate", "test_qa_scripts", "perf/startup"]
 const args = process.argv.slice(2), cut = args.indexOf("--except")
 const want = cut < 0 ? args : args.slice(0, cut), except = cut < 0 ? [] : args.slice(cut + 1)
 const unknown = [...want, ...except].filter((s) => !ALL.includes(s))
 if (unknown.length) { console.error(`no suite ${unknown.join(", ")}: ${ALL.join(" ")}`); process.exit(2) }
+const electronFetchedOnceNotRacedBySuites = () => { try { return createRequire(import.meta.url)("electron") } catch (e) { return e } }
+electronFetchedOnceNotRacedBySuites()
 const t0 = Date.now()
 const runs = await Promise.all((want.length ? want : ALL).filter((s) => !except.includes(s)).map((name) => new Promise<{ name: string; code: number; ms: number }>((resolve) => {
   const began = Date.now(), child = spawn(process.execPath, [path.join(import.meta.dirname, `${name}.ts`)], { stdio: ["ignore", "pipe", "pipe"] })

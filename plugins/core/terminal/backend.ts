@@ -6,7 +6,7 @@ import path from "node:path"
 import { execFile, spawn } from "node:child_process"
 import type { IPty } from "node-pty"
 import type { Said } from "./osc7501.ts"
-import { Failure, PROTOCOL, type Capture, type CaptureFormat, type Event, type Exit as Ended } from "./termd/protocol.ts"
+import { Failure, oldSocket, PROTOCOL, type Capture, type CaptureFormat, type Event, type Exit as Ended } from "./termd/protocol.ts"
 import { connectTo, type Msg, termdClient, Wire } from "./wire.ts"
 
 const log = logger("terminal")
@@ -197,6 +197,13 @@ export type ServerFiles = { files: string; socket: string }
 /** Opening a Windows pipe to look would take one of its instances. */
 const markOf = (f: ServerFiles) => (WIN ? `${f.files}.pid` : f.socket)
 const there = (f: string) => new Promise<boolean>((ok) => fs.stat(f, (e) => ok(!e)))
+function handedOver(socket: string): ServerFiles[] {
+  if (WIN) return []
+  const dir = path.dirname(socket), prefix = path.basename(oldSocket(socket, 0)).slice(0, -1)
+  let names: string[] = []
+  try { names = fs.readdirSync(dir) } catch { return [] }
+  return names.filter((n) => n.startsWith(prefix) && /^\d+$/.test(n.slice(prefix.length))).map((n) => ({ files: path.join(dir, n), socket: path.join(dir, n) }))
+}
 async function takeOver(w: Wire, olds: ServerFiles[], log?: (...a: unknown[]) => void) {
   for (const { socket: old } of olds) {
     const r = await w.request("adopt", { socket: old, scrollback: limits.scrollback() }, 60_000).then((a) => a.adopted, (e: Error) => e.message)
@@ -208,6 +215,7 @@ async function takeOver(w: Wire, olds: ServerFiles[], log?: (...a: unknown[]) =>
 export function termdBackend(name: string, o: { daemon: string; log?: (...a: unknown[]) => void; oldServers?: ServerFiles[]; probeMs?: number }) {
   const { files, socket } = serverFiles(name)
   const mark = markOf({ files, socket })
+  const olds = () => [...o.oldServers ?? [], ...handedOver(socket)]
   let ctl: Promise<Wire> | null = null
 
   // Detached and, under systemd, in a scope of its own: else stopping the app's server's unit ends it too.
@@ -242,7 +250,7 @@ export function termdBackend(name: string, o: { daemon: string; log?: (...a: unk
         w.onClose = () => { answered(); if (ctl !== p) return; ctl = null; setTimeout(() => { if (!ctl) void running() }, Date.now() - at > 5000 ? 500 : 10_000).unref?.() }
         watch(w)
         client.follow(w)
-        await takeOver(w, o.oldServers ?? [], o.log && ((...a) => o.log!("terminal:", ...a)))
+        await takeOver(w, olds(), o.log && ((...a) => o.log!("terminal:", ...a)))
         return w
       })
       ctl = p
@@ -252,7 +260,7 @@ export function termdBackend(name: string, o: { daemon: string; log?: (...a: unk
   }
   async function running(): Promise<Wire | null> {
     if (ctl) return ctl.catch(() => null)
-    if (!(await there(mark)) && !(await Promise.all((o.oldServers ?? []).map((f) => there(markOf(f))))).some(Boolean)) return null
+    if (!(await there(mark)) && !(await Promise.all(olds().map((f) => there(markOf(f))))).some(Boolean)) return null
     return control().catch(() => null)
   }
 
@@ -290,11 +298,12 @@ export function termdBackend(name: string, o: { daemon: string; log?: (...a: unk
     ...b, socket, files,
     trouble: (): Trouble | null => (stall ? { since: stall.since, pid: stall.pid, text: stallText() } : null),
     async create(id: string, spec: Spec, c?: Made) {
+      const used = control()
       try { await b.create(id, spec, c) } catch (e) {
         if (!(e instanceof Failure && e.code === "retiring")) throw e
-        o.log?.("terminal: the terminal server's files were gone, so it retired: starting a new one")
+        o.log?.("terminal: the terminal server's files were gone, so it retired or handed its terminals over: starting a new one")
         for (let i = 0; i < 40 && fs.existsSync(mark); i++) await new Promise((r) => setTimeout(r, 50))
-        ctl = null
+        if (ctl === used) { ctl = null; void used.then((w) => w.close(), () => {}) }
         await b.create(id, spec, c)
       }
     },

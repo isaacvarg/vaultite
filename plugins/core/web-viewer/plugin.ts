@@ -3,7 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import { marked } from "marked"
 import { z } from "zod"
-import { OpError, Plugin, vaultPath, type OpCtx } from "../../../core/plugins.ts"
+import { OpError, pageFiles, Plugin, vaultPath, type OpCtx } from "../../../core/plugins.ts"
 import { parseTerminal } from "../../../core/agents.ts"
 import { Kind, writeAtomic, type Vault } from "../../../core/vault.ts"
 import { addBookmarks, addFolder, editBookmark, folderPath, readBookmarks, readFolders, removeBookmark, removeFolder, renameFolder, type Bookmark } from "./bookmarks.ts"
@@ -173,24 +173,6 @@ each with the lines it's inside: a control looked for without the whole tree.
   text: (r: Page & { snapshot: string; find?: string }) => `${where(r)}\n\n${r.find && !r.snapshot ? `No line has "${r.find}".` : r.snapshot}`,
 })
 
-async function filesFor(given: unknown, ctx: OpCtx) {
-  const list = (Array.isArray(given) ? given : [given]).map((f) => String(f ?? "").trim()).filter(Boolean)
-  if (!list.length) throw new OpError("upload needs `files`: vault paths (Attachments/cv.pdf), or absolute paths on this machine")
-  let size = 0
-  return Promise.all(list.map(async (f) => {
-    let file: string
-    if (path.isAbsolute(f) || f.startsWith("~/")) {
-      const why = await ctx.refusal?.("giving a page a file from this machine")
-      if (why) throw new OpError(`${why}: give a file in the vault instead`, 403)
-      file = f.startsWith("~/") ? path.join(os.homedir(), f.slice(2)) : f
-    } else file = plugin.vault.abs(vaultPath(f))
-    let data: Buffer
-    try { data = fs.readFileSync(file) } catch { throw new OpError(`no file ${f}`, 404) }
-    if ((size += data.length) > 50 << 20) throw new OpError("upload takes 50 MB at most")
-    return { name: path.basename(file), data: data.toString("base64") }
-  }))
-}
-
 plugin.op({
   id: "web-viewer.act",
   cli: "browser act",
@@ -202,7 +184,7 @@ there; with fields, a whole form at once, each field by ref or name: text typed,
 checked by true or false), type (adds to it), paste (text into the control or what has focus, as a paste: --format
 markdown or html keeps its formatting in editors like Google Docs, never the user's clipboard), press (a key, on a control
 or the page: Enter, Tab, Escape, Meta+a...), check, uncheck, select (an option of a list, by its text), upload (files
-into a file input: vault paths, or absolute paths on this machine), scroll (up or down, the page or a control). Answers
+into a file input, or the button that picks one: vault paths, or absolute paths on this machine), scroll (up or down, the page or a control). Answers
 once the page settled: where the tab is, what it downloaded (into the Downloads folder of the Mac whose browser it is)
 and what changed on the page since you last saw it (diff: summary, up to 30 lines; a number of lines; none: ~ a control
 changed, + new, - gone), or the new page's content when it went to another. Act on that answer: it's the page as it is.
@@ -240,7 +222,7 @@ changed, + new, - gone), or the new page's content when it went to another. Act 
     const value = p.value
     const html = p.action !== "paste" || !value ? undefined : p.format === "html" ? value : p.format === "markdown" ? await marked.parse(value) : undefined
     return ask<Acted>("agent:act", p.tab, { action: p.action, ref: p.ref, name: p.name, role: p.role, value, html, key: p.key, direction: p.direction, fields: p.fields, diff: p.diff,
-      ...(p.action === "upload" ? { files: await filesFor(p.files, ctx) } : {}) }, await by(ctx, p))
+      ...(p.action === "upload" ? { files: await pageFiles(p.files, (f) => plugin.vault.abs(vaultPath(f)), ctx.refusal) } : {}) }, await by(ctx, p))
   },
   text: (r: Acted) => `${r.navigated ? "Went to another page. " : ""}${where(r)}${(r.opened ?? []).map((o) => `\nOpened tab ${o.tab}: ${o.title || "(untitled)"} ${o.url} (yours: act there by its number)`).join("")}${changed(r)}`,
   did: (p) => ({ action: "run", text: Array.isArray(p.fields) ? `Filled ${p.fields.length} fields in browser tab ${String(p.tab)}`

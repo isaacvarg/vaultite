@@ -1,5 +1,10 @@
 import type { Any, VaultTest } from "./harness.ts"
+import fs from "node:fs"
+import path from "node:path"
 import { messageOf } from "../../../core/values.ts"
+import { shellQuote } from "../../../core/agents.ts"
+import { psQuote } from "../../../plugins/core/terminal/launch.ts"
+import { defaultShell, kindOf } from "../../../plugins/core/terminal/shells.ts"
 
 export default async ($: VaultTest) => {
   const { api, check } = $
@@ -197,9 +202,16 @@ export default async ($: VaultTest) => {
     await api("POST", "ops/terminal.end", { id: deploy.id })
     check("knocks op: mute ignores its session's knocks, the next ones too", b.did?.state === "ignored" && after.state === "ignored", [b.did, after])
 
-    const osc = (x: string) => `printf '\\033]7501;state=${x}\\033\\\\'`
-    const [, waits] = await api("POST", "ops/terminal.start", { command: `${osc("idle")}; IFS= read -r l; ${osc("working")}; sleep 600`, name: "knock-waits" })
-    const [, ends] = await api("POST", "ops/terminal.start", { command: `${osc("idle")}; sleep 600`, name: "knock-ends" })
+    const resting = path.join($.tmp, "knock-resting.cjs")
+    fs.writeFileSync(resting, `const say = (s) => process.stdout.write("\\x1b]7501;state=" + s + "\\x1b\\\\")
+say("idle")
+if (process.argv[2] === "until-a-line") process.stdin.once("data", () => say("working"))
+setInterval(() => {}, 600_000)
+`)
+    const kind = kindOf(defaultShell()), node = (...args: string[]) => [process.execPath, resting, ...args]
+    const line = (argv: string[]) => (kind === "pwsh" ? `& ${argv.map(psQuote).join(" ")}` : kind === "cmd" ? argv.map((a) => `"${a}"`).join(" ") : argv.map(shellQuote).join(" "))
+    const [, waits] = await api("POST", "ops/terminal.start", { command: line(node("until-a-line")), name: "knock-waits" })
+    const [, ends] = await api("POST", "ops/terminal.start", { command: line(node()), name: "knock-ends" })
     const stateOf = async (id: string) => (await api("POST", "ops/terminal.get", { id }))[1].state
     for (let i = 0; i < 100 && ((await stateOf(waits.id)) !== "idle" || (await stateOf(ends.id)) !== "idle"); i++) await $.sleep(50)
     const [, k1] = await api("POST", "ops/companion.knock", { line: "Which branch?", terminal: waits.id, who: "Waits" })

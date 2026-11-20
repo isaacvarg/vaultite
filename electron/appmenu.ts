@@ -1,4 +1,4 @@
-import { app, BaseWindow, Menu, nativeImage, shell } from "electron"
+import { app, BaseWindow, Menu, shell } from "electron"
 import { AppWindow } from "./appwindow.ts"
 import { execFileSync } from "node:child_process"
 import fs from "node:fs"
@@ -7,8 +7,8 @@ import { menuTemplate } from "./menu.ts"
 import { CODE } from "./identity.ts"
 import { updateMenuItem } from "./updates.ts"
 import { gitEnv } from "../core/gitenv.ts"
-import { ICON, MAC, ROOT } from "./mainbase.ts"
-import { known, nameOf, remotes, save, setMenuBuilder, setZoom, zoom, ZOOMS } from "./vaultlist.ts"
+import { ROOT } from "./mainbase.ts"
+import { known, listedNames, nameOf, remotes, save, setMenuBuilder, setZoom, zoom, ZOOMS } from "./vaultlist.ts"
 import { popouts, wins } from "./servers.ts"
 import { failedBox } from "./errors.ts"
 import { focusedVault, openVault, sandbox, send, showManager } from "./vaultwindow.ts"
@@ -16,16 +16,8 @@ import { openRemote, remoteWins } from "./remotewin.ts"
 import { showSetup } from "./setupwin.ts"
 import { openFiles, pickOutside } from "./fromoutside.ts"
 
-// Never the bundle's icon: changing the bundle breaks its signature and updates.
-export const DOCK_ICON = () => path.join(app.getPath("userData"), "dock-icon.png")
 export const IMAGE_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif",
   webp: "image/webp", svg: "image/svg+xml", avif: "image/avif", bmp: "image/bmp" }
-export function applyDockIcon() {
-  if (!MAC || !app.dock) return
-  if (fs.existsSync(DOCK_ICON())) app.dock.setIcon(DOCK_ICON())
-  else if (!app.isPackaged && fs.existsSync(ICON)) app.dock.setIcon(ICON)
-  else app.dock.setIcon(nativeImage.createEmpty())
-}
 
 function command(id: string) {
   return (_item: unknown, from?: BaseWindow) => {
@@ -69,6 +61,7 @@ const issues = (() => {
 let menuShown = ""
 function buildMenu() {
   const recent = [...known].sort((a, b) => (b.last ?? 0) - (a.last ?? 0))
+  const names = listedNames(recent.map((v) => v.path))
   const w = focusedVault()
   const update = updateMenuItem()
   const template = menuTemplate({
@@ -76,7 +69,7 @@ function buildMenu() {
     run: command,
     go: (p) => { const f = focusedVault(); if (f?.ready) f.win.webContents.send("vaultite", { type: "go", path: p }) },
     update,
-    vaults: [...recent.map((v) => ({ label: nameOf(v.path), sublabel: v.path, type: "checkbox" as const, checked: wins.has(v.path),
+    vaults: [...recent.map((v, i) => ({ label: names[i], sublabel: v.path, type: "checkbox" as const, checked: wins.has(v.path),
       click: () => openVault(v.path).catch((e) => failedBox(`Couldn't open ${nameOf(v.path)}`, e)) })),
       ...remotes.map((r) => ({ label: r.name, sublabel: r.url, type: "checkbox" as const, checked: remoteWins.has(r.url), click: () => openRemote(r.url) }))],
     manageVaults: showManager,

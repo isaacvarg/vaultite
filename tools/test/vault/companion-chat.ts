@@ -256,8 +256,10 @@ export default async ($: VaultTest) => {
         await f()
         await $.sleep(100)
         await idle(id)
+        const states = () => w.got.slice(from).flatMap((m) => (m.t === "agent" && m.agent.name === "Claude" ? [`${m.agent.state}${m.agent.seen ? " seen" : ""}`] : []))
+        await waitFor(() => states().at(-1)?.startsWith("watching"), 3000, 10)
         await $.sleep(50)
-        const s = w.got.slice(from).flatMap((m) => (m.t === "agent" && m.agent.name === "Claude" ? [`${m.agent.state}${m.agent.seen ? " seen" : ""}`] : []))
+        const s = states()
         return s.filter((x: string, i: number) => x !== s[i - 1]).join(", ")
       }
       const turns: Record<string, string> = {}

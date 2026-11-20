@@ -2,16 +2,20 @@ import { app, type Rectangle } from "electron"
 import fs from "node:fs"
 import path from "node:path"
 import { DEV } from "./identity.ts"
-import { UPDATE_MODES, type UpdateMode } from "./updates.ts"
 import type { HelperPrefs } from "./helper.ts"
 import { sandboxPath } from "./sandbox.ts"
 import * as Setup from "./setup.ts"
+import { folderName, listNames, nicknameAt, vaultName } from "../core/vaultname.ts"
+
+export type UpdateMode = "automatic" | "notify" | "off"
+export const UPDATE_MODES: UpdateMode[] = ["automatic", "notify", "off"]
 
 export type Known = {
   path: string; port?: number; open?: boolean; last?: number
   bounds?: Rectangle; maximized?: boolean
   lightsOff?: boolean
   outside?: string[]
+  nickname?: string
 }
 const LIST = () => path.join(app.getPath("userData"), "vaults.json")
 export const ZOOMS = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3]
@@ -46,14 +50,30 @@ export function save(now = false) {
   if (now) write()
   else saveTimer = setTimeout(write, 500)
 }
-export const nameOf = (p: string) => (p === sandboxPath() ? "Playground" : path.basename(p) || p)
+const nicknameOf = (p: string) => (p === sandboxPath() ? "Playground" : find(p)?.nickname)
+export const nameOf = (p: string) => vaultName(p, nicknameOf(p))
+export const folderOf = (p: string) => (p === sandboxPath() ? "Playground" : folderName(p))
+export const listedNames = (ps: string[]) => listNames(ps.map((p) => ({ path: p, nickname: nicknameOf(p) })))
 export const find = (p: string) => known.find((v) => v.path === p)
+export async function learnNames(vs = known) {
+  const now = await Promise.all(vs.map((v) => nicknameAt(v.path)))
+  let changed = false
+  vs.forEach((v, i) => {
+    const n = now[i]
+    if (n === null || n === (v.nickname ?? "")) return
+    if (n) v.nickname = n
+    else delete v.nickname
+    changed = true
+  })
+  if (changed) { save(); buildMenu() }
+}
 export function remember(p: string) {
   let v = find(p)
   if (!v) known.push((v = { path: p }))
   v.last = Date.now()
   save()
   buildMenu()
+  void learnNames([v])
   return v
 }
 export const real = (p: string) => {

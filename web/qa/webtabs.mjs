@@ -12,7 +12,7 @@ import fs from "node:fs"
 import http from "node:http"
 import os from "node:os"
 import path from "node:path"
-import { ROOT, qa, until, keepAwake, uiAt } from "./lib/qa.mjs"
+import { ROOT, pageNotLastScreen, qa, until, keepAwake, uiAt } from "./lib/qa.mjs"
 import { app as appOf } from "./lib/app.mjs"
 
 const { args: [VAULT], check, watch, done } = await qa(import.meta.url, { chrome: false })
@@ -61,7 +61,7 @@ async function launch() {
     executablePath: path.join(ROOT, "node_modules/.bin/electron"), args: [ROOT, "--vault", VAULT],
     env: { ...process.env, VAULTITE_QUIET: process.env.SHOW ? "" : "1", VAULTITE_USER_DATA: path.join(TMP, "userData"), VAULTITE_LOCAL: path.join(TMP, "local") },
   })
-  win = await app.firstWindow()
+  win = await pageNotLastScreen(app)
   ui = appOf(win)
   watch(win, { console: true, fail: false })
   await win.waitForSelector("[role=tree]", { timeout: 60000 })

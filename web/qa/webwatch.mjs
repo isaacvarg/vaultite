@@ -15,7 +15,7 @@ import fs from "node:fs"
 import http from "node:http"
 import os from "node:os"
 import path from "node:path"
-import { ROOT, SHOTS, qa, until, wait, uiAt } from "./lib/qa.mjs"
+import { ROOT, SHOTS, pageNotLastScreen, qa, until, wait, uiAt } from "./lib/qa.mjs"
 
 const { args: [VAULT], check, errs, watch, done } = await qa(import.meta.url, { chrome: false })
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "vau-webwatch-"))
@@ -103,7 +103,7 @@ async function launch() {
     executablePath: path.join(ROOT, "node_modules/.bin/electron"), args: [ROOT, "--vault", VAULT],
     env: { ...process.env, VAULTITE_QUIET: process.env.SHOW ? "" : "1", VAULTITE_TEST_CLAUDE_URL: SITE, VAULTITE_TEST_GH: GH, VAULTITE_USER_DATA: path.join(TMP, "userData"), VAULTITE_LOCAL: path.join(TMP, "local") },
   })
-  win = await app.firstWindow()
+  win = await pageNotLastScreen(app)
   watch(win, { console: true, fail: false })
   await win.waitForSelector("[role=tree]", { timeout: 60000 })
   origin = new URL(win.url()).origin

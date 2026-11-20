@@ -9,6 +9,11 @@ on:
   schedule:
     - cron: "37 7 * * *" # (off the hour: GitHub delays, and may drop, runs on it)
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish (the nightly release and feed); off, it only builds
+        type: boolean
+        default: true
 concurrency:
   group: release-${{ github.ref }}
 permissions:
@@ -41,16 +46,13 @@ jobs:
           echo "version=$major.$minor.$((patch + 1))-nightly.$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
           echo "build=true" >> "$GITHUB_OUTPUT"
 
-  # Each architecture on a runner of its own: most of a build is waiting on Apple's notarization (an app's, then its
-  # dmg's), and the two don't wait on each other. Publish merges their update lists (tools/feed.ts).
+  # Both architectures in one job: with a runner each, GitHub at times gave one no macOS runner and cancelled it after
+  # 15 minutes queued (v0.14.0's arm64, twice), so a release waits on one macOS runner, not two at once.
   mac:
     needs: plan
     if: needs.plan.outputs.build == 'true'
-    strategy:
-      matrix:
-        arch: [arm64, x64]
     runs-on: macos-15
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -91,19 +93,16 @@ jobs:
       - run: npx playwright-core install chromium
       - if: env.STABLE != 'true'
         run: npm pkg set version=${{ needs.plan.outputs.version }}
-      - run: npm pkg set --json 'build.mac.target[0].arch=["${{ matrix.arch }}"]' 'build.mac.target[1].arch=["${{ matrix.arch }}"]'
       - run: npm run ${{ env.STABLE == 'true' && 'release' || 'release:nightly' }}
-      # (its update list names only its zip: kept under its arch, for publish to merge with the other's)
-      - run: for f in dist-app/*-mac.yml; do mv "$f" "${f%.yml}.${{ matrix.arch }}.yml"; done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: mac-${{ matrix.arch }}
+          name: mac
           if-no-files-found: error
           path: |
             dist-app/*.dmg
             dist-app/*-mac.zip
             dist-app/*-mac.zip.blockmap
-            dist-app/*-mac.*.yml
+            dist-app/*-mac.yml
 
   linux:
     needs: plan
@@ -200,6 +199,7 @@ jobs:
 
   publish:
     needs: [plan, mac, linux, windows]
+    if: github.event_name != 'workflow_dispatch' || inputs.publish
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

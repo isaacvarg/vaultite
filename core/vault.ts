@@ -7,10 +7,12 @@ import { setImmediate as turn } from "node:timers/promises"
 import { withKindBlocks } from "./blocks.ts"
 import type { Manifest } from "./contracts/manifest.ts"
 import type { KeptText, StartTexts } from "./fmcache.ts"
+import type { ReadFile, Reading } from "./readahead.ts"
+import { CACHES, type Listed, listVault, NOT_SETTINGS, placeholderStat, settingsStats, type Stat, statFrom, statsOf } from "./listing.ts"
 import { merge3, patchFrontmatter, same } from "./textedit.ts"
 import { dates, dump, YAMLError } from "./yaml.ts"
 import { tagsOf } from "./sections.ts"
-import { bodyLine, FM, frontmatter, loadFm, parseText, prose, stripNl } from "./frontmatter.ts"
+import { bodyLine, FM, frontmatter, loadFm, parseText, prose, stripNl, textOf } from "./frontmatter.ts"
 import { ARCHIVE_DIR, archiveTwin, effectiveType, excluder, homeFolder, inArchive, isArchived, isHiddenPath } from "./fileprops.ts"
 import { kindOf } from "./filetypes.ts"
 import { formatLink, linkStyleOf, type NewLink, shortestName } from "./linkformat.ts"
@@ -24,6 +26,7 @@ import { holdingVault } from "./vaultholder.ts"
 
 const log = logger("vault")
 export { extract, hasTag, tagName, tagsOf } from "./sections.ts"
+export { ms, statFrom } from "./listing.ts"
 export { ARCHIVE_DIR, archiveTwin, effectiveType, inArchive, isArchived, isHiddenPath, unarchived } from "./fileprops.ts"
 export { bodyLine, FM, frontmatter, keepBlocks, loadFm, parseText, prose, renameProperty, renameTagText, setPropertyText } from "./frontmatter.ts"
 
@@ -206,21 +209,18 @@ function gone(file: string, e: unknown) {
   return codeOf(e) === "ENOENT" && !fs.existsSync(path.join(path.dirname(file), `.${path.basename(file)}.icloud`))
 }
 
-const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
-
 /** A text file, line endings as \n. Throws ENOENT, a TypeError when it isn't UTF-8, or a read iCloud hasn't given yet
  *  (notHereYet: the API answers 503): a placeholder (asked for, there at a later sync) or one readSoon waits on. */
 export function readText(p: string) {
   return textOf(readBytes(p))
 }
-const textOf = (buf: Buffer) => decoder.decode(buf).replace(/\r\n?/g, "\n")
 
 /** A file's bytes, read now; a placeholder iCloud left is asked for and throws as readText says. */
 export function readBytes(p: string): Buffer {
   if (Date.now() - (reading.get(p)?.since ?? Infinity) >= SLOW && !onDisk(p)) throw stillDownloading(p)
   try { const b = fs.readFileSync(p); if (fetching.size) fetching.delete(p); return b } catch (e) {
     if (!placeholder(e)) throw e
-    fetchFromICloud(p, e)
+    fetchFromICloud(p, e, { asked: true })
     throw stillDownloading(p, e)
   }
 }
@@ -236,7 +236,7 @@ const stillDownloading = (p: string, cause?: unknown) =>
 
 /** How long a sync waits for a file before going on without it; a read going on SLOW ms is held (iCloud). */
 export const READ_WAIT = 2000
-const SLOW = 1000
+const SLOW = 1000, HELD_AGAIN = 200
 const ARRIVAL = 60_000
 const reading = new Map<string, { since: number; data: Promise<Buffer> }>()
 
@@ -282,21 +282,37 @@ export function slowReads(after = SLOW) {
 export const iCloud = {
   on: process.platform === "darwin",
   /** Whether a stat is of a placeholder: a size, nothing on disk. Cheap: from a stat the scan takes anyway. */
-  evicted: (_abs: string, st: { blocks: number | bigint; size: number | bigint }) => Number(st.blocks) === 0 && Number(st.size) > 0,
+  evicted: (_abs: string, st: { blocks: number | bigint; size: number | bigint }) => placeholderStat(st),
   download(p: string, done: (err: Error | null) => void) { execFile("/usr/bin/brctl", ["download", p], { timeout: 60_000 }, done) },
 }
 const placeholder = (e: unknown) => iCloud.on && Math.abs(errnoOf(e) ?? 0) === 11
 const evicted = (abs: string, st: fs.BigIntStats | fs.Stats) => iCloud.on && iCloud.evicted(abs, st)
 
-const fetching = new Map<string, number>()
-export function fetchFromICloud(p: string, e: unknown) {
+/** Few asks at once, each file less often: every ask is work for iCloud's process, once busy for hours on a vault's. */
+const ASK_AGAIN = 60_000, ASK_AT_MOST = 3_600_000, ASKS_AT_ONCE = 4
+const fetching = new Map<string, { at: number; wait: number }>()
+const askQueue: string[] = []
+let asking = 0
+export function fetchFromICloud(p: string, e: unknown, { asked = false } = {}) {
   if (!placeholder(e)) return
-  const now = Date.now()
-  if (now - (fetching.get(p) ?? 0) < 60_000) return
-  fetching.set(p, now)
-  iCloud.download(p, (err) => {
-    if (err && fs.existsSync(p)) log.warn(`couldn't ask iCloud for ${p}: ${err.message}`)
-  })
+  const now = Date.now(), was = fetching.get(p)
+  if (was && now - was.at < (asked ? ASK_AGAIN : was.wait)) return
+  fetching.set(p, { at: now, wait: was ? Math.min(was.wait * 2, ASK_AT_MOST) : ASK_AGAIN })
+  if (askQueue.includes(p)) askQueue.splice(askQueue.indexOf(p), 1)
+  if (asked) askQueue.unshift(p)
+  else askQueue.push(p)
+  askNext()
+}
+function askNext() {
+  while (asking < ASKS_AT_ONCE && askQueue.length) {
+    const p = askQueue.shift()!
+    asking++
+    iCloud.download(p, (err) => {
+      asking--
+      if (err && fs.existsSync(p)) log.warn(`couldn't ask iCloud for ${p}: ${err.message}`)
+      askNext()
+    })
+  }
 }
 
 /** Keep a vault in iCloud Drive downloaded on this Mac (Finder's Keep Downloaded, macOS 15), so iCloud stops evicting
@@ -565,12 +581,12 @@ export function sortBy<T>(xs: T[], key: (x: T) => unknown, reverse = false): T[]
     .sort((p, q) => (reverse ? cmp(q[1], p[1]) : cmp(p[1], q[1])) || p[2] - q[2]).map((p) => p[0])
 }
 
-type Stat = { ns: bigint; size: number; born: number }
-const CACHES = new Set(["node_modules", "__pycache__"])
+export type Looked = { t0: number; locks: number; heard: number; settingsHeard: number; wrote: number; listed: Listed; texts: Map<string, string | Error>; late: string[]
+  parsed?: Map<string, ReadFile> }
 const unscanned = (rel: string) => rel.split("/").some((n, i, all) => (n.startsWith(".") && (n !== ARCHIVE_DIR || i === all.length - 1)) ||
   n.endsWith(".icloud") || n.includes(".tmp-") || (i < all.length - 1 && CACHES.has(n)))
 const sameStat = (a: Stat, b: Stat) => a.ns === b.ns && a.size === b.size
-const NOT_SETTINGS = new Set([".vaultite/artifacts", ".vaultite/cache", ".vaultite/generated"])
+const SETTINGS_FILE = /^\.(vaultite|obsidian)\//
 const unseen = (rel: string) => NOT_SETTINGS.has(rel.split("/").slice(0, 2).join("/")) ||
   (unscanned(rel) && !/^\.(vaultite|obsidian)(\/|$)/.test(rel) && !rel.endsWith(".icloud"))
 
@@ -614,6 +630,22 @@ export class Entry {
   }
 }
 
+function keptTags(e: Entry, k?: KeptText) {
+  if (k?.[3] && e.text === k[2]) e.tagCache = { fm: e.fm, body: e.body, tags: k[3] }
+  return e
+}
+
+function fill(e: Entry, t: string, pre?: ReadFile) {
+  if (pre?.[1] === t) {
+    e.fm = pre[2]; e.body = t.slice(pre[3], pre[4]); e.bodyLine = pre[5]
+    e.tagCache = { fm: e.fm, body: e.body, tags: pre[6] }
+  } else {
+    [e.fm, e.body] = parseText(t)
+    e.bodyLine = bodyLine(t)
+  }
+  e.text = t
+}
+
 const base = (rel: string) => rel.slice(rel.lastIndexOf("/") + 1)
 export const stemOf = (rel: string) => base(rel).replace(/\.md$/, "")
 
@@ -624,22 +656,6 @@ function named(k: Kind, item: Item, rel: string, owned: Item): Item {
   return had.includes(title) ? owned : { ...owned, aliases: [title, ...had] }
 }
 
-export const ms = (ns: bigint) => Number(ns / 1000000n)
-
-/** What the index keeps of a file's stat. */
-const STATS_AT_ONCE = 256
-async function statsOf(paths: (string | null)[]): Promise<(fs.BigIntStats | null | undefined)[]> {
-  const out: (fs.BigIntStats | null | undefined)[] = []
-  for (let i = 0; i < paths.length; i += STATS_AT_ONCE) {
-    out.push(...await Promise.all(paths.slice(i, i + STATS_AT_ONCE).map((p) => (p === null ? null : fs.promises.stat(p, { bigint: true }).catch(() => undefined)))))
-  }
-  return out
-}
-
-export function statFrom(st: fs.BigIntStats): Stat {
-  const born = st.birthtimeNs > 0n ? st.birthtimeNs : st.ctimeNs < st.mtimeNs ? st.ctimeNs : st.mtimeNs
-  return { ns: st.mtimeNs, size: Number(st.size), born: ms(born) }
-}
 
 function statOf(p: string): Stat {
   return statFrom(fs.statSync(p, { bigint: true }))
@@ -675,6 +691,10 @@ export class Vault {
   private settings = new Map<string, string | null>()
   private lastGood = new Map<string, { text: string; stat: string }>()
   private queue: Promise<unknown> = Promise.resolve()
+  private locks = 0
+  doing = ""
+  private holders = 0
+  private waiters = 0
   private next: Promise<boolean> | null = null
   private hooks = new Set<(vault: Vault) => void>()
   private types: Map<string, Kind> | null = null
@@ -685,10 +705,13 @@ export class Vault {
   pluginList: { id: string; manifest: Manifest; tier?: string }[] = []
   private off: { conf: string | null | undefined; list: unknown; off: Set<string> } | null = null
   startTexts: StartTexts | null = null
+  startRead: Promise<void> | null = null
+  reading: Reading | null = null
   downloading: string[] = []
   private evicted: string[] = []
   private arrivals = new Set<(rel: string) => void>()
   private writes = new Set<(rel: string) => void>()
+  private wrote = 0
 
   mayWrite: (plugin: string, rel: string) => boolean = () => false
   writerHere = true
@@ -697,25 +720,28 @@ export class Vault {
   constructor(p: string) {
     this.path = p
     setGate(p, { may: (plugin, rel) => this.mayWrite(plugin, rel), refused: (plugin, rel) => this.writeRefused(plugin, rel), watch: (rel) => this.watch(rel),
-      wrote: (rel) => { for (const fn of this.writes) fn(rel) } })
+      wrote: (rel) => { if (!unseen(rel) && !rel.startsWith(".vaultite/")) this.wrote++; for (const fn of this.writes) fn(rel) } })
   }
 
   lock<T>(fn: () => Promise<T> | T): Promise<T> {
     const watched = async () => {
       const t0 = Date.now(), by = errorContext.getStore() ?? "the server's own work"
-      const dog = setInterval(() => log.error(`held ${Math.round((Date.now() - t0) / 1000)} s by ${by}`), HELD_LONG)
+      const dog = setInterval(() => log.error(`held ${Math.round((Date.now() - t0) / 1000)} s by ${by}${this.doing ? ` (${this.doing})` : ""}`), HELD_LONG)
       dog.unref()
       holdingVault(by)
-      try { return await fn() } finally { clearInterval(dog); holdingVault("") }
+      this.locks++
+      this.holders++
+      try { return await fn() } finally { this.holders--; this.doing = ""; clearInterval(dog); holdingVault("") }
     }
-    const run = this.queue.then(watched, watched)
+    this.waiters++
+    const run = this.queue.then(watched, watched).finally(() => { this.waiters-- })
     this.queue = run.catch(() => {})
     return run
   }
 
   private watched = false
   private stale = true
-  private walked = 0
+  walked = 0
   private linkedOut = false
 
   watching(on: boolean, untold?: () => boolean) {
@@ -740,18 +766,20 @@ export class Vault {
   }
 
   async hear(rels: string[] | null): Promise<boolean> {
+    if (!this.walked) return this.heardBefore(rels)
     const seen = rels?.filter((r) => !unseen(r))
     const now = seen ? await statsOf(seen.map((r) => this.abs(r))) : []
     const told = seen?.filter((r, i) => !this.indexedAs(r, now[i] ?? undefined))
     if (told && !told.length) return false
-    if (!told || this.next || !this.vouched() || told.some((r) => !this.entries.has(r) && !this.others.has(r))) {
+    if (told && this.settingsOnly(told)) return this.heardSettings()
+    if (!told || this.next || !this.filesVouched() || told.some((r) => !this.entries.has(r) && !this.others.has(r))) {
       this.stale = true
       this.heardCount += told?.length ?? 1
       return this.synced({ trusting: true })
     }
     this.heardCount++
     return this.lock(async () => {
-      if (!this.vouched()) return this.sync()
+      if (!this.filesVouched()) return this.sync()
       const stats = (await statsOf(told.map((r) => this.abs(r)))).map((st) => st ?? undefined)
       if (this.walks(told, stats)) return this.sync()
       const md = told.filter((r, i) => stats[i] && r.endsWith(".md"))
@@ -788,7 +816,7 @@ export class Vault {
   }
 
   async reread(rels: string[]): Promise<boolean> {
-    if (!this.vouched()) return this.sync()
+    if (!this.filesVouched()) return this.sync()
     const stats = (await statsOf(rels.map((rel) => this.abs(rel)))).map((st) => st ?? undefined)
     if (this.walks(rels, stats)) return this.sync()
     const { texts } = await this.readAll(rels.filter((r, i) => stats[i] && r.endsWith(".md")))
@@ -823,21 +851,94 @@ export class Vault {
 
   private rewalk: ReturnType<typeof setTimeout> | null = null
   vouched(within = VOUCH) {
-    return this.watched && !this.stale && !this.linkedOut && !this.downloading.length && !this.evicted.length &&
-      !this.missing.size && Date.now() - this.walked < within
+    return this.filesVouched(within) && !this.settingsStale
+  }
+
+  filesVouched(within = VOUCH) {
+    return this.watched && !this.stale && !this.linkedOut && !this.missing.size && Date.now() - this.walked < within
+  }
+
+  private settingsStale = false
+  private settling: Promise<boolean> | null = null
+  private settingsOnly(told?: string[]) {
+    return (told ? told.every((r) => SETTINGS_FILE.test(r)) : this.settingsStale) && !this.next && this.filesVouched()
+  }
+
+  private checking = false
+  private trustedNow(): Promise<boolean> | null {
+    if (this.settingsOnly()) return this.settleSoon()
+    if (this.next || !this.vouched(Infinity)) return null
+    this.rewalk ??= setTimeout(() => {
+      this.rewalk = null
+      this.checking = !this.next
+      this.synced().catch((e) => log.error("the walk after a trusted read failed", e)).finally(() => { this.checking = false })
+    }, 100)
+    return Promise.resolve(false)
+  }
+
+  private undrained(trusting: boolean) {
+    return this.synced({ trusting: trusting && this.settingsStale })
+  }
+
+  private settleSoon() {
+    return this.settling ??= turn().then(() => this.lock(() => { this.settling = null; return this.settle() }))
+  }
+
+  private heardBefore(rels: string[] | null) {
+    if (rels?.every((r) => SETTINGS_FILE.test(r))) this.settingsChanged()
+    else this.heard(null)
+    return false
+  }
+
+  private heardSettings() {
+    this.settingsChanged()
+    return this.synced({ trusting: true })
+  }
+
+  private settingsHeard = 0
+  private settingsChanged() {
+    this.settingsStale = true
+    this.settingsHeard++
   }
 
   synced({ trusting = false, drained = false } = {}): Promise<boolean> {
-    if (trusting && !this.next && this.vouched()) return Promise.resolve(false)
-    if (drained && this.untold && !this.next) return this.drain().then((ok) => (ok ? false : this.synced()))
-    if (trusting && !this.next && this.vouched(Infinity)) {
-      this.rewalk ??= setTimeout(() => { this.rewalk = null; this.synced().catch((e) => log.error("the walk after a trusted read failed", e)) }, 100)
-      return Promise.resolve(false)
-    }
-    return this.next ??= turn().then(() => this.lock(() => {
-      this.next = null
-      return this.sync()
-    }))
+    if (trusting && (!this.next || this.checking) && this.vouched(this.checking ? Infinity : VOUCH)) return Promise.resolve(false)
+    const trusted = trusting && !this.untold?.() ? this.trustedNow() : null
+    if (trusted) return trusted
+    if (drained && this.untold && !this.next) return this.drain().then((ok) => (ok ? false : this.undrained(trusting)))
+    const after = trusting ? this.trustedNow() : null
+    if (after) return after
+    return this.next ??= turn().then(async () => {
+      const pre = await this.looked()
+      return this.lock(() => {
+        this.next = null
+        return this.sync(pre)
+      })
+    })
+  }
+
+  async settle(): Promise<boolean> {
+    if (!this.settingsStale) return false
+    this.settingsStale = false
+    try {
+      const away: string[] = [], seen = await settingsStats(this.path, away, evicted), notes = this.evicted.filter((r) => !SETTINGS_FILE.test(r))
+      const found = new Map([...this.entries].map(([r, e]) => [r, e.stat]))
+      return await this.walk({ t0: Date.now(), locks: this.locks, heard: this.heardCount, settingsHeard: this.settingsHeard, wrote: this.wrote, texts: new Map(), late: this.downloading,
+        listed: { found, others: this.others, folders: this.folders, away: [...notes, ...away], linkedOut: this.linkedOut, seen } })
+    } catch (e) {
+      this.settingsStale = true
+      throw e
+    } finally { this.owners = null }
+  }
+
+  async looked(): Promise<Looked | null> {
+    if (this.holders || this.waiters) return null
+    try { return await this.look({ ahead: true }) } catch { return null }
+  }
+
+  async walkNow() {
+    const pre = await this.looked()
+    return this.lock(() => this.sync(pre))
   }
 
   abs(rel: string) {
@@ -845,16 +946,20 @@ export class Vault {
     return path.join(this.path, rel)
   }
 
-  afterSync(fn: (vault: Vault) => void) {
+  afterSync(fn: (vault: Vault) => void, by = "") {
+    if (by) this.hookNames.set(fn, by)
     return added(this.hooks, fn)
   }
+  private hookNames = new WeakMap<(vault: Vault) => void, string>()
 
   private async afterSyncHooks() {
     let since = performance.now()
     for (const fn of this.hooks) {
+      this.doing = `after a sync: ${this.hookNames.get(fn) ?? "a hook"}`
       if (performance.now() - since > 20) { await turn(); since = performance.now() }
       try { fn(this) } catch (e) { log.error("a plugin's after-sync hook failed", e) }
     }
+    this.doing = ""
   }
 
   onArrive(fn: (rel: string) => void) {
@@ -865,9 +970,9 @@ export class Vault {
     return added(this.writes, fn)
   }
 
-  private async readAll(rels: string[]) {
+  private async readAll(rels: string[], wait = READ_WAIT) {
     const texts = new Map<string, string | Error>(), late: string[] = [], was = new Set(this.downloading)
-    const deadline = Date.now() + READ_WAIT
+    const deadline = Date.now() + wait
     let at = 0
     const next = async () => {
       for (let rel = rels[at++]; rel !== undefined; rel = rels[at++]) {
@@ -889,7 +994,7 @@ export class Vault {
 
   async fetchSettings() {
     const away: string[] = []
-    await this.settingsStats(away)
+    await settingsStats(this.path, away, evicted)
     this.evicted = away
     await this.fetchEvicted(away)
   }
@@ -1163,8 +1268,15 @@ export class Vault {
     for (const d of this.plainDirs) if (rel.startsWith(d + "/")) return null
     const typed = this.typed(fm)
     if (typed) return typed
-    const untyped = typeof fm.type !== "string" || !fm.type.trim()
-    return this.kinds.find((k) => k.owns(rel) || (untyped && !!k.spec.owns?.(rel))) ?? null
+    const untyped = typeof fm.type !== "string" || !fm.type.trim(), owner = (this.owners ?? this.filesOwned()).get(rel.toLowerCase())
+    return this.kinds.find((k) => k === owner || (untyped && !!k.spec.owns?.(rel))) ?? null
+  }
+
+  private owners: Map<string, Kind> | null = null
+  private filesOwned() {
+    const owners = new Map<string, Kind>()
+    for (const k of this.kinds) { const f = k.file?.toLowerCase(); if (f && !owners.has(f)) owners.set(f, k) }
+    return owners
   }
 
   private typed(fm: Item): Kind | null {
@@ -1214,45 +1326,7 @@ export class Vault {
     return this.folderSet("dashboards") ?? homeFolder(mine, "Dashboards") ?? "Dashboards"
   }
 
-  private async scan() {
-    const away: string[] = []
-    let linkedOut = false
-    const found = new Map<string, Stat>()
-    const others = new Map<string, Stat>()
-    const folders: string[] = []
-    const stack = [""]
-    const root = path.join(this.path, "/")
-    const linked = new Set<string>()
-    const top = await fs.promises.stat(root, { bigint: true }).catch(() => null)
-    if (top) linked.add(`${top.dev}:${top.ino}`)
-    while (stack.length) {
-      const sub = stack.pop()!
-      let names: fs.Dirent[]
-      try {
-        names = await fs.promises.readdir(root + sub, { withFileTypes: true })
-      } catch {
-        continue
-      }
-      const listed = names.filter((d) => !((d.name.startsWith(".") && (d.name !== ARCHIVE_DIR || !d.isDirectory())) || d.name.endsWith(".icloud")))
-      const stats = await statsOf(listed.map((d) => (d.isDirectory() ? null : root + (sub ? `${sub}/${d.name}` : d.name))))
-      for (const [i, d] of listed.entries()) {
-        const name = d.name, rel = sub ? `${sub}/${name}` : name, st = stats[i]
-        if (st === undefined) continue
-        if (d.isSymbolicLink()) linkedOut = true
-        if (st === null || st.isDirectory()) {
-          if (CACHES.has(name)) continue
-          if (st) { const key = `${st.dev}:${st.ino}`; if (linked.has(key)) continue; linked.add(key) }
-          folders.push(rel)
-          stack.push(rel)
-          continue
-        }
-        const stat = statFrom(st)
-        if (name.endsWith(".md") && !name.includes(".tmp-")) { found.set(rel, stat); if (evicted(root + rel, st)) away.push(rel) }
-        else others.set(rel, stat)
-      }
-    }
-    const seen = await this.settingsStats(away)
-    folders.sort()
+  private adopt({ found, others, folders, away, linkedOut, seen }: Listed) {
     if (others.size !== this.others.size || folders.length !== this.folders.length || folders.some((f, i) => f !== this.folders[i]) ||
       [...others].some(([r, st]) => { const was = this.others.get(r); return !was || !sameStat(was, st) })) this.version++
     this.others = others
@@ -1264,91 +1338,96 @@ export class Vault {
     return found
   }
 
-  private async settingsStats(away: string[]) {
-    const out: string[] = []
-    const stack = [".vaultite"]
-    while (stack.length) {
-      const sub = stack.pop()!
-      let names: string[]
-      try {
-        names = await fs.promises.readdir(this.abs(sub))
-      } catch {
-        continue
-      }
-      const rels = names.map((name) => `${sub}/${name}`).filter((rel, i) => !(NOT_SETTINGS.has(rel) || CACHES.has(names[i]!) || names[i]!.includes(".tmp-")))
-      const stats = await statsOf(rels.map((rel) => this.abs(rel)))
-      for (const [i, rel] of rels.entries()) {
-        const st = stats[i]
-        if (!st) continue
-        if (st.isDirectory()) { stack.push(rel); continue }
-        const gone = evicted(this.abs(rel), st)
-        if (gone) away.push(rel)
-        out.push(`${rel}:${st.mtimeNs}:${st.size}${gone ? ":evicted" : ""}`)
-      }
-    }
-    const look = async (dir: string, file: (name: string) => string | null) => {
-      try { return (await fs.promises.readdir(this.abs(`.obsidian/${dir}`))).map(file).filter((f): f is string => f !== null) } catch { return [] }
-    }
-    const names = ["app.json", "types.json", "daily-notes.json", "templates.json", "appearance.json", "hotkeys.json", "command-palette.json", "bookmarks.json", "themes", "snippets",
-      ...await look("themes", (n) => `themes/${n}/theme.css`), ...await look("snippets", (n) => (n.endsWith(".css") ? `snippets/${n}` : null))]
-    const stats = await statsOf(names.map((name) => this.abs(`.obsidian/${name}`)))
-    for (const [i, name] of names.entries()) { const st = stats[i]; if (st) out.push(`${name}:${st.mtimeNs}:${st.size}`) }
-    return out.sort().join("\n")
-  }
 
-  waiting() { return this.missing.size > 0 }
 
-  async sync(): Promise<boolean> {
-    const t0 = Date.now()
-    this.stale = false
+  waiting() { return this.missing.size > 0 || this.downloading.length > 0 }
+
+  async sync(pre?: Looked | null): Promise<boolean> {
+    const fresh = !!pre && this.locks === pre.locks + 1 && this.holders === 1 && this.wrote === pre.wrote
     try {
-      const changed = await this.walk()
-      this.walked = t0
+      const at = fresh ? pre : await this.look({ ahead: false, before: pre })
+      if (fresh && this.heardCount === pre.heard) this.stale = false
+      if (fresh && this.settingsHeard === pre.settingsHeard) this.settingsStale = false
+      const changed = await this.walk(at)
+      this.walked = at.t0
       return changed
     } catch (e) {
       this.stale = true
       throw e
-    }
+    } finally { this.owners = null }
   }
 
-  private async walk(): Promise<boolean> {
-    this.settings.clear()
+  private async look({ ahead, before }: { ahead: boolean; before?: Looked | null }): Promise<Looked> {
+    const t0 = Date.now(), locks = this.locks, heard = this.heardCount, settingsHeard = this.settingsHeard, wrote = this.wrote
+    if (!ahead) this.stale = this.settingsStale = false
+    if (!ahead) this.doing = "listing the vault's files"
+    const listed = (this.startTexts ? await this.reading?.listing() : null) ?? await listVault(this.path, evicted)
+    await this.startRead
+    const start = this.startTexts, evictedNow = new Set(listed.away)
+    const stale = (r: string, st: Stat) => { const e = this.entries.get(r); return !e || !sameStat(e.stat, st) || e.broken }
+    const unkept = (r: string, st: Stat) => { const k = start?.had.get(r); return !k || k[0] !== String(st.ns) || k[1] !== st.size || evictedNow.has(r) }
+    const changed = [...listed.found].flatMap(([r, st]) => (stale(r, st) && unkept(r, st) ? [r] : []))
+    const reread = new Set(changed), had = new Map<string, string | Error>()
+    for (const r of changed) {
+      const t = before?.texts.get(r), was = before?.listed.found.get(r), st = listed.found.get(r)!
+      if (t !== undefined && was && sameStat(was, st)) had.set(r, t)
+    }
+    if (!ahead) this.doing = `reading ${changed.length - had.size} changed files${listed.away.length ? `, ${listed.away.length} iCloud has yet to bring down` : ""}`
+    const parsed = await this.readFirst(changed.filter((r) => !had.has(r) && !evictedNow.has(r)), before)
+    const [{ texts, late }, away] = await Promise.all([this.readAll(changed.filter((r) => !had.has(r) && !parsed.has(r)), parsed.size ? HELD_AGAIN : READ_WAIT),
+      this.fetchEvicted(listed.away.filter((r) => !reread.has(r)))])
+    return { t0, locks, heard, settingsHeard, wrote, listed, texts: new Map([...had, ...[...parsed].map(([r, f]) => [r, f[1]] as const), ...texts]), late: [...late, ...away], parsed }
+  }
+
+  private async readFirst(rels: string[], before?: Looked | null) {
+    const parsed = new Map(before?.parsed)
+    if (!this.startTexts || !this.reading) return parsed
+    for (const [r, f] of await this.reading.read(rels.filter((r) => !parsed.has(r)))) parsed.set(r, f)
+    return parsed
+  }
+
+  private async walk(at: Looked): Promise<boolean> {
+    const settingsWere = this.settingsVersion
+    const found = this.adopt(at.listed)
+    if (this.settingsVersion !== settingsWere || !this.walked) this.settings.clear()
     try {
       const plain = this.plain().map((d) => d.replace(/^\/+|\/+$/g, "")).filter(Boolean)
       if (plain.join("\n") !== this.plainDirs.join("\n")) this.plainDirs = plain
     } catch (e) { log.error("couldn't ask which folders hold patterns", e) }
-    const found = await this.scan()
+    this.owners = this.filesOwned()
     const kinds = `${this.kindsVersion}:${this.settingsVersion}:${this.plainDirs.join("\n")}`, recheck = kinds !== this.kindsSeen
     this.kindsSeen = kinds
     let changed = [...found].filter(([r, st]) => {
       const e = this.entries.get(r)
       return !e || !sameStat(e.stat, st) || e.broken || (recheck && e.kind !== this.kindFor(r, e.fm))
     }).map(([r]) => r)
-    const reread = new Set(changed), start = this.startTexts, kept = new Map<string, KeptText>()
+    const start = this.startTexts, kept = new Map<string, KeptText>()
     if (start) {
       const away = new Set(this.evicted)
       for (const r of changed) { const k = start.had.get(r), st = found.get(r)!; if (k && k[0] === String(st.ns) && k[1] === st.size && !away.has(r)) kept.set(r, k) }
     }
-    const [{ texts, late: unread }, away] = await Promise.all([this.readAll(kept.size ? changed.filter((r) => !kept.has(r)) : changed),
-      this.fetchEvicted(this.evicted.filter((r) => !reread.has(r)))])
+    const looked = new Set(at.late)
+    const { texts: more, late: unread } = await this.readAll(changed.filter((r) => !kept.has(r) && !at.texts.has(r) && !looked.has(r)))
+    const texts = new Map([...at.texts, ...more]), away = at.late
     for (const [r, k] of kept) texts.set(r, k[2])
     if (start) for (const r of changed) {
       const t = texts.get(r), st = found.get(r)!
       if (typeof t === "string") start.now.set(r, kept.get(r) ?? [String(st.ns), st.size, t])
     }
-    const late = [...unread, ...away].sort()
+    const late = [...new Set([...unread, ...away])].sort()
     if (late.join("\n") !== this.downloading.join("\n")) { this.downloading = late; this.version++ }
     changed = changed.filter((r) => texts.has(r))
     const now = Date.now()
+    const dirs = new Map<string, boolean>(), isDirNow = (p: string) => dirs.get(p) ?? dirs.set(p, isDir(p)).get(p)!
     const vanished = (top: string) => {
-      if (isDir(this.abs(top))) { this.missing.delete(top); return true }
-      if (!isDir(this.path)) return false
+      if (isDirNow(this.abs(top))) { this.missing.delete(top); return true }
+      if (!isDirNow(this.path)) return false
       const since = this.missing.get(top) ?? now
       this.missing.set(top, since)
       return now - since >= 3000
     }
     const gone = [...this.entries.keys()].filter((r) => !found.has(r) &&
-      (r.includes("/") ? vanished(r.split("/")[0]) : isDir(this.path)))
+      (r.includes("/") ? vanished(r.split("/")[0]) : isDirNow(this.path)))
     for (const rel of gone) this.drop(rel)
     if (this.missing.size) {
       const tops = new Set([...this.entries.keys()].map((r) => r.split("/")[0]))
@@ -1356,11 +1435,12 @@ export class Vault {
     }
     const unchanged = new Set<string>()
     let since = performance.now()
+    this.doing = `indexing ${changed.length} changed files`
     for (const rel of changed.sort()) {
       if (performance.now() - since > 20) { await turn(); since = performance.now() }
       const st = found.get(rel)!
       const was = this.entries.get(rel)
-      const e = this.read(rel, st, texts.get(rel))
+      const e = keptTags(this.read(rel, st, texts.get(rel), at.parsed?.get(rel)), kept.get(rel))
       if (was && was.broken && e.broken && sameStat(was.stat, st) && same(was.problems, e.problems)) unchanged.add(rel)
     }
     changed = changed.filter((r) => !unchanged.has(r))
@@ -1369,16 +1449,14 @@ export class Vault {
     return !!(changed.length || gone.length)
   }
 
-  read(rel: string, st: Stat, text?: string | Error): Entry {
+  read(rel: string, st: Stat, text?: string | Error, pre?: ReadFile): Entry {
     const e = new Entry(rel, st, null)
     const old = this.entries.get(rel)
     if (old?.kind) this.ordered.delete(old.kind)
     try {
       const t = text ?? readText(this.abs(rel))
       if (typeof t !== "string") throw t
-      ;[e.fm, e.body] = parseText(t)
-      e.text = t
-      e.bodyLine = bodyLine(t)
+      fill(e, t, pre)
     } catch (ex) {
       const name = ex instanceof YAMLError ? "YAMLError" : ex instanceof TypeError ? "UnicodeDecodeError" : "OSError"
       e.problems = [`can't read the frontmatter (${name}); nothing from this file was updated`]
@@ -1703,14 +1781,14 @@ export class Vault {
     fs.rmSync(this.abs(`.vaultite/${name}.json`), { force: true })
     this.settings.delete(name)
     this.lastGood.delete(name)
-    this.stale = true
+    this.settingsChanged()
   }
 
   setConfig(name: string, data: unknown) {
     const file = this.abs(`.vaultite/${name}.json`), text = JSON.stringify(data, null, 2) + "\n"
     writeAtomic(file, text)
     this.settings.delete(name)
-    this.stale = true
+    this.settingsChanged()
     try { this.lastGood.set(name, { text, stat: configStat(file) }) } catch { this.lastGood.delete(name) }
   }
 

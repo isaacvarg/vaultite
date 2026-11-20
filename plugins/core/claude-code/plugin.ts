@@ -1,11 +1,11 @@
-import { execFileSync } from "node:child_process"
+import { execFile, execFileSync } from "node:child_process"
+import { promisify } from "node:util"
 import { createHash } from "node:crypto"
 import fs from "node:fs"
-import os from "node:os"
 import path from "node:path"
 import { z } from "zod"
-import { type AgentAsk, type AgentCommand, type Awaits, sameAwaits, type AgentMeter, type AgentModel, type AgentModels, type Asking, type Choice, type Question, type AgentStart, ago, codingAgent, dayOf, expandHome, findBin, HOME, isoOf, jsonLines, JsonlScan, limitRows,
-  limitWindow, type Live, type SampleAsk, agentRefusal, notOnThisMachine, priceList, processes, projectName, projectOf, shellQuote, projectRoots, epochSeconds, Tally, terminalOf, Transcript, transcripts,
+import { type AgentAsk, type AgentCommand, type Awaits, sameAwaits, type AgentMeter, type AgentModel, type AgentModels, type Asking, type Choice, type Question, type AgentStart, ago, codingAgent, dayOf, expandHome, findBin, HOME, JsonlScan, limitRows,
+  type Live, type SampleAsk, agentRefusal, notOnThisMachine, priceList, projectName, projectOf, shellQuote, projectRoots, epochSeconds, Tally, terminalOf, Transcript, transcripts,
   lastTurn, parseTerminal, PERMISSION_MODES, type PermissionMode, trustClaudeProject, usedFirst, when } from "../../../core/agents.ts"
 import { bullets, gitEnv, localDate, logger, OpError, Plugin, section } from "../../../core/plugins.ts"
 import { type Item, sortBy } from "../../../core/vault.ts"
@@ -14,18 +14,19 @@ import { userSaid } from "./chatlog.ts"
 import { chats } from "./chat.ts"
 import { type EditSpan, editSpans } from "./edits.ts"
 import { dialogOn } from "./dialog.ts"
-import { SAMPLE_DIR, sample } from "./sample.ts"
+import { sample } from "./sample.ts"
 import { teleports } from "./teleport.ts"
 import { cloudSessions } from "./cloud.ts"
 import { FAMILIES, modelId, modelName, notAModel } from "./models.ts"
 import { memoryLines, unsaid } from "./memory.ts"
+import { type Account, isAsking, limitsOf } from "./limits.ts"
+const execFileAsync = promisify(execFile)
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 const int = (v: unknown) => Math.trunc(Number(v) || 0)
 
 export const plugin = new Plugin(import.meta.url)
 const log = logger("claude-code")
 const DEFAULT_DIR = process.env.CLAUDE_CONFIG_DIR ? path.resolve(process.env.CLAUDE_CONFIG_DIR) : path.join(HOME, ".claude")
-const APP_HISTORY = path.join(HOME, "Library", "Application Support", "Claude", "plan-usage-history.json")
 
 // US dollars per million tokens, the published API list: input, output, cache read, cache write 5 min, cache write 1 h.
 const price = priceList<[number, number, number, number, number]>({
@@ -39,11 +40,8 @@ const price = priceList<[number, number, number, number, number]>({
   "claude-haiku-4-5": [1, 5, 0.1, 1.25, 2], "claude-3-5-haiku": [0.8, 4, 0.08, 1, 1.6],
 })
 const FAST = 2
-const PLANS: [string, string, number | null][] = [["max_20x", "Max 20x", 200], ["max_5x", "Max 5x", 100], ["max", "Max", null],
-  ["pro", "Pro", 20], ["team", "Team", null], ["enterprise", "Enterprise", null]]
 
 
-type Account = { id: string; dir: string; label: string; private: boolean }
 const ACCOUNT_ID = /^[a-z0-9]{1,32}$/
 
 function accounts(): Account[] {
@@ -145,6 +143,8 @@ const scanOf = (a: Account) => {
   if (!s) scans.set(a.dir, (s = new Scan(() => [path.join(a.dir, "projects")], () => path.join(plugin.localDir(), `scan-${keyOf(a.dir)}.json`))))
   return s
 }
+const { limits, plans } = limitsOf(plugin, { defaultDir: DEFAULT_DIR, accountJson, scanOf })
+
 function titleOf(id: string, accts = accounts()) {
   for (const a of accts) if (!a.private) { const t = scans.get(a.dir)?.titles.get(id)?.[1]; if (t) return t }
   return ""
@@ -202,7 +202,7 @@ function lstart(s: string, utc = false) {
 
 const started = new Map<number, [unknown, boolean]>()
 
-function alive(pid: number, start: unknown) {
+async function alive(pid: number, start: unknown) {
   try {
     process.kill(pid, 0)
   } catch (e) {
@@ -214,9 +214,9 @@ function alive(pid: number, start: unknown) {
   if (seen && seen[0] === start) return seen[1]
   let out: string
   try {
-    out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 3000 })
+    out = (await execFileAsync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 3000 })).stdout
   } catch (e) {
-    return !(e instanceof Error && "status" in e && e.status !== undefined)
+    return !(e instanceof Error && "code" in e && typeof e.code === "number")
   }
   if (!out.trim()) return false
   const ran = lstart(out), wrote = lstart(String(start), true)
@@ -225,196 +225,40 @@ function alive(pid: number, start: unknown) {
   return same
 }
 
-function running(accts: Account[]) {
-  return accts.flatMap((a) => {
+const sessionsRead = new Map<string, { ms: number; size: number; s: Item | null }>()
+function sessionAt(file: string): Item | null {
+  let st: fs.Stats
+  try { st = fs.statSync(file) } catch { sessionsRead.delete(file); return null }
+  const had = sessionsRead.get(file)
+  if (had?.ms === st.mtimeMs && had.size === st.size) return had.s
+  let s: Item | null
+  try { s = JSON.parse(fs.readFileSync(file, "utf8")) } catch { s = null }
+  sessionsRead.set(file, { ms: st.mtimeMs, size: st.size, s })
+  return s
+}
+
+async function running(accts: Account[]) {
+  const found = accts.flatMap((a) => {
     const d = path.join(a.dir, "sessions")
     let names: string[] = []
     try { names = fs.readdirSync(d).filter((n) => n.endsWith(".json")).sort() } catch { return [] }
     return names.flatMap((n) => {
-      let s: Item
-      try { s = JSON.parse(fs.readFileSync(path.join(d, n), "utf8")) } catch { return [] }
+      const s = sessionAt(path.join(d, n))
+      if (!s) return []
       const pid = Math.trunc(Number(s.pid)), cwd = String(s.cwd || "")
-      if (!Number.isFinite(pid) || isAsking(cwd) || !alive(pid, s.procStart)) return []
+      if (!Number.isFinite(pid) || isAsking(cwd)) return []
       return [{ a, s, pid, cwd, sid: typeof s.sessionId === "string" ? s.sessionId : "" }]
     })
   })
+  const up = await Promise.all(found.map((f) => alive(f.pid, f.s.procStart)))
+  return found.filter((_, i) => up[i])
 }
 
 async function live(accts: Account[]): Promise<Live[]> {
   const ms = (v: unknown) => (typeof v === "number" ? v : null)
-  return running(accts).map(({ a, s, pid, cwd, sid }) => ({ pid, id: sid, title: a.private ? "" : scanOf(a).titles.get(sid)?.[1] || s.name || "",
+  return (await running(accts)).map(({ a, s, pid, cwd, sid }) => ({ pid, id: sid, title: a.private ? "" : scanOf(a).titles.get(sid)?.[1] || s.name || "",
     name: a.private ? "" : s.name || "", status: s.status || "", kind: s.kind || "", cwd: a.private ? "" : cwd, started: ms(s.startedAt),
     since: ms(s.statusUpdatedAt), account: a.id, ...(a.private ? { project: a.label, private: true } : {}) }))
-}
-
-
-const LABELS: Record<string, string> = { session: "Current session", week: "This week", opus: "This week, Opus", sonnet: "This week, Sonnet" }
-
-const window = (key: string, minutes: number, used: number, resets: number | null, now: number, label = LABELS[key]) =>
-  limitWindow(key, label, minutes, used, resets, now)
-const KEYS: Record<string, [string, number]> = { five_hour: ["session", 300], seven_day: ["week", 10080],
-  seven_day_opus: ["opus", 10080], seven_day_sonnet: ["sonnet", 10080] }
-const windows = (rl: Item, used: string, resets: (v: unknown) => number | null, now: number) => Object.entries(KEYS).flatMap(([name, [k, m]]) => {
-  const w = rl[name]
-  return w && typeof w === "object" && typeof w[used] === "number" ? [window(k, m, w[used], resets(w.resets_at), now)] : []
-})
-
-const ASKING_DIR = path.join(os.tmpdir(), "vaultite-claude-limits")
-let askingReal = ""
-let sampleReal = ""
-const isAsking = (cwd: string) => (!!askingReal && cwd === askingReal) || cwd === (sampleReal ||= (() => { try { return fs.realpathSync(SAMPLE_DIR) } catch { return "" } })())
-
-function askClaude(dir: string): Promise<Item | null> {
-  const bin = process.env.VAULTITE_TEST === "1" ? null : findBin("claude")
-  if (!bin) return Promise.resolve(null)
-  try { fs.mkdirSync(ASKING_DIR, { recursive: true }); askingReal ||= fs.realpathSync(ASKING_DIR) } catch { return Promise.resolve(null) }
-  const env: NodeJS.ProcessEnv = { ...process.env, PATH: [path.dirname(bin), process.env.PATH].filter(Boolean).join(":") }
-  if (dir === path.join(HOME, ".claude")) delete env.CLAUDE_CONFIG_DIR
-  else env.CLAUDE_CONFIG_DIR = dir
-  return jsonLines<Item>(bin, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence",
-    "--strict-mcp-config"], { env, cwd: ASKING_DIR, ms: 20000, first: { type: "control_request", request_id: "init", request: { subtype: "initialize" } },
-  hear: (m, send, done) => {
-    if (m.type !== "control_response") return
-    const r = m.response ?? {}
-    if (r.subtype !== "success") done(null)
-    else if (r.request_id === "init") send({ type: "control_request", request_id: "usage", request: { subtype: "get_usage", skipBehaviors: true } })
-    else if (r.request_id === "usage") done(r.response ?? null)
-  } })
-}
-
-const asked = (dir: string) => plugin.memoStale(120, async function claudeUsage(d: string) { return { at: Date.now() / 1000, got: await askClaude(d) } }, dir)
-
-const at = (v: unknown) => { const t = typeof v === "string" ? Date.parse(v) / 1000 : NaN; return Number.isFinite(t) ? t : null }
-
-async function accountLimits(now: number, dir: string) {
-  const { at: observed, got } = await asked(dir)
-  const rl = got?.rate_limits_available ? got.rate_limits : null
-  if (!rl || typeof rl !== "object") return null
-  const wins = windows(rl, "utilization", at, now)
-  for (const l of Array.isArray(rl.limits) ? rl.limits : []) {
-    const name = l?.kind === "weekly_scoped" && typeof l.percent === "number" ? l.scope?.model?.display_name : null
-    if (typeof name === "string" && name && !wins.some((w) => w.label === `This week, ${name}`))
-      wins.push(window(`week-${name.toLowerCase()}`, 10080, l.percent, at(l.resets_at), now, `This week, ${name}`))
-  }
-  return wins.length ? { source: "Claude account", observed, windows: wins } : null
-}
-
-function statusLineLimits(now: number, a: Account) {
-  const files: string[] = []
-  for (const dir of new Set([a.dir, path.join(HOME, ".claude")])) {
-    const d = path.join(dir, "usage-snapshots")
-    try { for (const n of fs.readdirSync(d)) if (n.endsWith(".json")) files.push(path.join(d, n)) } catch {}
-  }
-  let projects: string[] = []
-  try { projects = fs.readdirSync(path.join(a.dir, "projects")).map((n) => path.join(a.dir, "projects", n)) } catch { return null }
-  const mine = (sid: string) => projects.some((p) => fs.existsSync(path.join(p, `${sid}.jsonl`)))
-  const byAge = files.flatMap((f) => { try { return [[fs.statSync(f).mtimeMs / 1000, f] as const] } catch { return [] } }).sort((x, y) => y[0] - x[0])
-  for (const [observed, f] of byAge) {
-    if (now - observed > 7 * 86400) break
-    let rl: Item
-    try { rl = JSON.parse(fs.readFileSync(f, "utf8")).rate_limits } catch { continue }
-    if (!rl || typeof rl !== "object" || !mine(path.basename(f, ".json"))) continue
-    const wins = windows(rl, "used_percentage", (v) => (typeof v === "number" ? v : null), now)
-    if (wins.length) return { source: "status line", observed, windows: wins }
-  }
-  return null
-}
-
-const hour = (ts: number) => ts - (ts % 3600) // allowances renew on the hour, in UTC
-
-function appLimits(now: number, org: string | null, scan: Scan) {
-  let data: Item
-  try { data = JSON.parse(fs.readFileSync(APP_HISTORY, "utf8")) } catch { return null }
-  if (data.version !== 1 && data.version !== 2) return null
-  const samples: [number, Record<string, number>][] = []
-  for (const e of data.samples || []) {
-    if (!e || typeof e !== "object" || typeof e.t !== "number" || (org && e.org !== undefined && e.org !== null && e.org !== org)) continue
-    const u = data.version === 1 ? e : (e.u || {})
-    const kept: Record<string, number> = {}
-    for (const [k, v] of Object.entries(u)) if (["fh", "sd", "so", "sn"].includes(k) && typeof v === "number") kept[k] = v
-    samples.push([e.t / 1000, kept])
-  }
-  samples.sort((a, b) => a[0] - b[0])
-  if (!samples.length || now - samples[samples.length - 1][0] > 7 * 86400) return null
-  const [t, latest] = samples[samples.length - 1]
-  const wins = []
-  if ("fh" in latest && now - t < 5 * 3600) {
-    let end: number | null = null
-    if (latest.fh > 0) {
-      let i = samples.length - 1
-      while (i > 0 && (samples[i - 1][1].fh ?? 0) > 0 && samples[i][0] - samples[i - 1][0] < 5 * 3600) i--
-      const began = samples[i][0], earliest = i ? samples[i - 1][0] : samples[i][0] - 5 * 3600
-      const mine = [...scan.resp.values()].map((r) => r.ts).filter((ts) => earliest < ts && ts <= began)
-      end = hour(mine.length ? Math.min(...mine) : began) + 5 * 3600
-    }
-    wins.push(window("session", 300, latest.fh, end, now))
-  }
-  for (const [key, name] of [["sd", "week"], ["so", "opus"], ["sn", "sonnet"]]) {
-    if (!(key in latest)) continue
-    let resets: number | null = null
-    for (let j = samples.length - 1; j >= 1; j--) {
-      const [t0, a] = samples[j - 1], [t1, b] = samples[j]
-      if (key in a && key in b && b[key] + 1 < a[key]) {
-        resets = Math.min(hour(t0) + 3600, t1)
-        while (resets <= t) resets += 7 * 86400
-        break
-      }
-    }
-    if (resets === null && now - t > 86400) continue
-    wins.push(window(name, 10080, latest[key], resets, now))
-  }
-  return wins.length ? { source: "Claude app", observed: t, windows: wins } : null
-}
-
-function login(file: string): Item {
-  try { return JSON.parse(fs.readFileSync(file, "utf8")).oauthAccount || {} } catch { return {} }
-}
-
-async function plan(a: Account) {
-  const o = await plugin.memo(300, login, accountJson(a))
-  const tier = `${o.organizationRateLimitTier || ""} ${o.organizationType || ""}`.toLowerCase()
-  const hit = PLANS.find(([match]) => tier.includes(match))
-  return hit ? { name: hit[1], monthly: hit[2] } : null
-}
-
-async function limits(a: Account) {
-  const now = Date.now() / 1000
-  const live = await accountLimits(now, a.dir)
-  if (live) return { ...live, observed: isoOf(live.observed * 1000) }
-  const found = [statusLineLimits(now, a), appLimits(now, (await plugin.memo(300, login, accountJson(a))).organizationUuid ?? null, scanOf(a))]
-    .filter((x) => x !== null)
-  if (!found.length) return null
-  const best = found.reduce((x, y) => (y.observed > x.observed ? y : x))
-  return { ...best, observed: isoOf(best.observed * 1000) }
-}
-
-
-async function servers(accts: Account[]) {
-  const rows: Item[] = []
-  for (const { pid, started, command } of await processes()) {
-    if (!/^(\S*\/)?claude\s+remote-control(\s|$)/.test(command) || /\s(-h|--help)(\s|$)/.test(command)) continue
-    // Unnamed, its sessions are named after the machine (Remote Control's default).
-    const name = /--name(?:=|\s+)("[^"]*"|'[^']*'|\S+)/.exec(command)?.[1]?.replace(/^["']|["']$/g, "") || os.hostname().replace(/\.local$/, "")
-    // ps shows a process's environment to its user: its CLAUDE_CONFIG_DIR names its account
-    let dir = DEFAULT_DIR
-    try {
-      const env = execFileSync("ps", ["eww", "-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 3000 })
-      const d = /(?:^|\s)CLAUDE_CONFIG_DIR=(\S+)/.exec(env)?.[1]
-      if (d) dir = expandHome(d)
-    } catch {}
-    const a = accts.find((x) => x.dir === dir)
-    rows.push({ pid, name, account: a?.id ?? "", accountLabel: a?.label ?? path.basename(dir), started: isoOf(started) })
-  }
-  return sortBy(rows, (r) => [r.started ?? "", r.pid])
-}
-
-async function plans(accts: Account[]) {
-  const each = await Promise.all(accts.map(async (a) => ({ id: a.id, label: a.label, private: a.private, plan: await plan(a), limits: await limits(a) })))
-  const plans = each.map((a) => a.plan).filter((p) => p !== null)
-  const both = plans.length === each.length && plans.length > 1
-    ? { name: plans.map((p) => p.name).join(" + "), monthly: plans.every((p) => p.monthly) ? plans.reduce((n, p) => n + p.monthly!, 0) : null } : null
-  return { plan: each.length === 1 ? each[0].plan : both, limits: each.find((a) => a.limits)?.limits ?? null,
-    accounts: each, servers: await plugin.memoStale(10, servers, accts) }
 }
 
 
@@ -541,7 +385,7 @@ plugin.provide("agent-account:claude", async (terminal: string, session = ""): P
   const found = session ? sessionFile(session, true) : null
   if (found) return of(found.account)
   if (!terminal) return null
-  for (const { a, s, pid } of running(accts)) {
+  for (const { a, s, pid } of await running(accts)) {
     const key = `${pid}@${s.procStart}`
     const t = terminals.get(key) ?? await terminalOf(plugin, pid)
     if (t) terminals.set(key, t)
@@ -615,7 +459,7 @@ plugin.provide("agent-pick:claude", (questions: Question[], choices: Choice[] | 
 async function sessionIn(terminal: string) {
   const sid = parseTerminal(terminal)?.resume || ""
   if (sid || !terminal) return sid
-  for (const { a, s, pid, sid: id } of running(accounts())) {
+  for (const { a, s, pid, sid: id } of await running(accounts())) {
     if (!id || a.private) continue
     const key = `${pid}@${s.procStart}`
     const t = terminals.get(key) ?? await terminalOf(plugin, pid)
@@ -653,7 +497,7 @@ export async function tellWaits() {
   const tell = plugin.service("terminal:agent-waits")
   if (!tell) return
   const now = new Map<string, "permission" | "question">()
-  for (const { s, pid } of running(accounts())) {
+  for (const { s, pid } of await running(accounts())) {
     if (s.status !== "waiting") continue
     const key = `${pid}@${s.procStart}`
     const t = terminals.get(key) ?? await terminalOf(plugin, pid)
@@ -688,7 +532,7 @@ async function tellAwaits() {
   const tell = plugin.service("terminal:agent-awaits")
   if (!tell) return
   const now = new Map<string, Awaits>()
-  for (const { a, s, pid, sid } of running(accounts())) {
+  for (const { a, s, pid, sid } of await running(accounts())) {
     if (s.status !== "idle" || !sid || a.private) continue
     const key = `${pid}@${s.procStart}`
     const t = terminals.get(key) ?? await terminalOf(plugin, pid)
@@ -738,7 +582,7 @@ type Read = { tokens: number; last: number; ttl: number }
 const lastRead = new Map<string, { size: number; meter: Read | null }>()
 plugin.provide("agent-meters:claude", async (meters?: boolean): Promise<AgentMeter[]> => {
   const out: AgentMeter[] = []
-  for (const { a, s, pid, sid, cwd } of running(accounts())) {
+  for (const { a, s, pid, sid, cwd } of await running(accounts())) {
     if (!sid) continue
     const key = `${pid}@${s.procStart}`
     let terminal = terminals.get(key)
@@ -878,7 +722,7 @@ const agent = codingAgent(plugin, {
 const chat = chats(plugin, {
   accounts, sessionFile, models, modelName,
   async tuiOf(id) {
-    for (const { a, s, pid, sid } of running(accounts())) {
+    for (const { a, s, pid, sid } of await running(accounts())) {
       if (sid !== id || chat.hosted(id) || String(s.entrypoint ?? "").startsWith("sdk")) continue
       const key = `${pid}@${s.procStart}`
       const t = terminals.get(key) ?? await terminalOf(plugin, pid)
@@ -888,7 +732,7 @@ const chat = chats(plugin, {
     return null
   },
   async inTerminals() {
-    return new Set(running(accounts()).filter(({ s }) => !String(s.entrypoint ?? "").startsWith("sdk")).map(({ sid }) => sid).filter(Boolean))
+    return new Set((await running(accounts())).filter(({ s }) => !String(s.entrypoint ?? "").startsWith("sdk")).map(({ sid }) => sid).filter(Boolean))
   },
   async folders() {
     const u = await summary(30, accounts().filter((a) => !a.private))

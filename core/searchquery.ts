@@ -8,7 +8,7 @@ export const FENCE_FILES = 30, FENCE_LINES = 3
 type Field = "any" | "file" | "path" | "content"
 type Unit = "line" | "block" | "section" | "task" | "task-todo" | "task-done"
 /** `ranges` where it matches (to mark), `test` whether it does (a file's match: the first one will do). */
-type Matcher = { label: string; ranges: (s: string) => [number, number][]; test?: (s: string) => boolean }
+type Matcher = { label: string; ranges: (s: string) => [number, number][]; test?: (s: string) => boolean; re?: RegExp | null }
 
 export type Node =
   | { t: "and" | "or"; kids: Node[] }
@@ -89,19 +89,16 @@ function tokens(q: string): Tok[] {
 
 type Ctx = { field: Field; matchCase: boolean }
 
-const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-
 function textMatcher(s: string, matchCase: boolean): Matcher {
-  const want = matchCase ? s : s.toLowerCase()
-  const ascii = !matchCase && /^[\x20-\x7e]+$/.test(want) ? new RegExp(escapeRe(want), "i") : null
+  const source = foldedPattern(s, !matchCase), re = new RegExp(source, matchCase ? "g" : "gi")
   return {
-    label: `"${s}"${matchCase ? " (match case)" : ""}`,
-    test: (text) => !!want && (ascii ? ascii.test(text) : (matchCase ? text : text.toLowerCase()).includes(want)),
+    label: `"${s}"${matchCase ? " (match case)" : ""}`, re: source ? re : null,
+    test: (text) => { re.lastIndex = 0; return !!source && re.test(text) },
     ranges: (text) => {
-      if (!want) return []
-      const hay = matchCase ? text : text.toLowerCase()
       const out: [number, number][] = []
-      for (let at = hay.indexOf(want); at >= 0; at = hay.indexOf(want, at + want.length)) out.push([at, at + want.length])
+      if (!source) return out
+      re.lastIndex = 0
+      for (let m = re.exec(text); m; m = re.exec(text)) out.push([m.index, m.index + m[0].length])
       return out
     },
   }
@@ -322,6 +319,7 @@ export function highlighter(n: Node, where: "text" | "name" = "text"): (s: strin
   const ms = markers(n, where)
   return (s) => {
     if (!ms.length || !s) return []
+    if (ms.length === 1 && ms[0].re) return ms[0].ranges(s)
     const all = ms.flatMap((m) => m.ranges(s)).sort((a, b) => a[0] - b[0] || b[1] - a[1])
     const out: [number, number][] = []
     for (const r of all) {
@@ -331,6 +329,37 @@ export function highlighter(n: Node, where: "text" | "name" = "text"): (s: strin
     }
     return out
   }
+}
+
+export type LineFinder = { lines: (text: string) => number[]; count: (text: string) => number }
+export function lineFinder(n: Node, where: "text" | "name" = "text"): LineFinder {
+  const ms = markers(n, where), marks = highlighter(n, where)
+  if (!ms.every((m) => m.re)) {
+    const lines = (text: string) => text.split("\n").flatMap((l, i) => (marks(l).length ? [i] : []))
+    return { lines, count: (text) => lines(text).length }
+  }
+  const flags = [...new Set(ms.map((m) => m.re!.flags))]
+  const res = flags.map((f) => new RegExp(ms.filter((m) => m.re!.flags === f).map((m) => `(?:${m.re!.source})`).join("|"), f))
+  const lines = (text: string) => {
+    const all = res.flatMap((re) => linesHit(re, text, true))
+    return res.length > 1 ? [...new Set(all)].sort((a, b) => a - b) : all
+  }
+  return { lines, count: (text) => (res.length > 1 ? lines(text).length : linesHit(res[0], text, false).length) }
+}
+
+function linesHit(re: RegExp, text: string, numbered: boolean): number[] {
+  const out: number[] = []
+  let line = 0, at = 0
+  re.lastIndex = 0
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (numbered) for (let nl = text.indexOf("\n", at); nl >= 0 && nl < m.index; nl = text.indexOf("\n", at)) { line++; at = nl + 1 }
+    out.push(line)
+    const end = text.indexOf("\n", m.index + m[0].length)
+    if (end < 0) break
+    re.lastIndex = at = end + 1
+    line++
+  }
+  return out
 }
 
 const FIELD: Record<Field, string> = { any: "the name or text has", file: "the file name has", path: "the path has", content: "the text has" }
@@ -365,7 +394,7 @@ export function explain(n: Node): string {
 export const marksOf = (ranges: [number, number][]) => ranges.flatMap(([a, b]) => Array.from({ length: b - a }, (_, k) => a + k))
 
 export function wordRanges(text: string, words: string[]): [number, number][] {
-  const low = text.toLowerCase()
+  const low = lowerFolded(text)
   const all: [number, number][] = []
   for (const w of words) if (w) for (let at = low.indexOf(w); at >= 0; at = low.indexOf(w, at + w.length)) all.push([at, at + w.length])
   all.sort((a, b) => a[0] - b[0])
@@ -440,3 +469,4 @@ export function suggestQuery(q: string, caret: number, v: QueryVocab, max = 8): 
 }
 
 import { messageOf } from "./values.ts"
+import { escapeRe, foldedPattern, lowerFolded } from "./fold.ts"

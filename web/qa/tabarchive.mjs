@@ -1,7 +1,7 @@
 // Tabs archiving themselves (plugins/core/tabs/archived.tsx): unseen unpinned tabs close into Archived tabs, reopened,
 // found and renamed there. WRITES the Tabs settings, plugins.json and workspaces' files (put back): throwaway only.
 //   node web/qa/tabarchive.mjs <base url> <vault path>
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { apiAt, command, qa, until, wait } from "./lib/qa.mjs"
 import { setAsideWorkspaces, workspaces } from "./lib/wsfiles.mjs"
@@ -16,8 +16,7 @@ const PLUGINS = path.join(VAULT, ".vaultite/plugins.json")
 const tabsBefore = existsSync(TABS) ? readFileSync(TABS, "utf8") : null
 const pluginsBefore = readFileSync(PLUGINS, "utf8")
 const putBackWorkspaces = setAsideWorkspaces(B)
-mkdirSync(path.dirname(TABS), { recursive: true })
-writeFileSync(TABS, JSON.stringify({ archive_after: "12h" }) + "\n")
+await api("PATCH", "config/plugin/tabs", { archive_after: "12h" })
 
 const old = Date.now() - 13 * 3600_000
 // (each a tab of one pane: tab "ta", its pane "pa")
@@ -33,8 +32,9 @@ try {
   await page.goto(B)
   await page.waitForSelector("[aria-label='New tab']", { timeout: 30000 })
   // (archiving on for longer than 12 hours too: none archives sooner after it's turned on, workspace.ts' archivingDue)
+  await page.goto(`${B}api/health`)
   await page.evaluate(([l, since]) => { localStorage.setItem("vaultite.tabs", JSON.stringify(l)); localStorage.setItem("vaultite.tabs.archiving", String(since)) }, [layout, old])
-  await page.goto("about:blank"); await page.goto(`${B}#file/${encodeURIComponent(a)}`)
+  await page.goto(`${B}#file/${encodeURIComponent(a)}`)
   await page.waitForSelector("[data-tab-id='ta']", { timeout: 30000 })
   const ids = () => page.$$eval("[data-tab-strip] [data-tab-id]", (els) => els.map((e) => e.getAttribute("data-tab-id")))
   check("the tabs as saved", (await ids()).join() === "ta,tb,tp,tt,tw", await ids())

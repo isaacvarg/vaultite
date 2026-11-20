@@ -5,7 +5,7 @@ import type { Any, VaultTest } from "./harness.ts"
 import { skip } from "../lib.ts"
 
 export default async ($: VaultTest) => {
-  const { VAULT, check } = $
+  const { VAULT, api, check, write } = $
   // Manage vaults on the web (core/vaults.ts): a list on this machine, any folder but hidden and system ones.
   const vaultsMod = await import("../../../core/vaults.ts")
   const opened: string[] = []
@@ -53,4 +53,38 @@ export default async ($: VaultTest) => {
     check("vaults: what in it isn't a vault is left out", vr.vaults.map((v: Any) => v.path).join() === `${VAULT},/elsewhere` && vaultsMod.current("/x") === "/x", vr)
     if (was === null) fs.rmSync(file); else fs.writeFileSync(file, was)
   }
+
+  const N = await import("../../../core/vaultname.ts")
+  check("vault names: two folders of one name show as much of their paths as tells them apart",
+    N.listNames([{ path: "/code/areth/vault" }, { path: "/code/lighthouse/vault" }, { path: "/notes/Main" }]).join() === "areth/vault,lighthouse/vault,Main")
+  check("vault names: two nicknames of one name too, after the nickname",
+    N.listNames([{ path: "/code/areth/vault", nickname: "Docs" }, { path: "/code/lighthouse/vault", nickname: "Docs" }]).join() === "Docs · areth/vault,Docs · lighthouse/vault")
+  check("vault names: a path that ends another's shows one folder more",
+    N.listNames([{ path: "/a/vault" }, { path: "/b/a/vault" }]).join() === "a/vault,b/a/vault")
+  check("vault names: a nickname is one line of text, else none",
+    N.nicknameOf({ name: "  Areth \n docs " }) === "Areth docs" && N.nicknameOf({ name: 5 }) === "" && N.nicknameOf({}) === "" && N.vaultName("/code/areth/vault", "") === "vault")
+  {
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), "vaults-named-")), dir = path.join(other, "vault")
+    fs.mkdirSync(path.join(dir, ".vaultite"), { recursive: true })
+    fs.writeFileSync(path.join(dir, ".vaultite", "vault.json"), JSON.stringify({ name: "Lighthouse" }))
+    const file = path.join(process.env.VAULTITE_LOCAL!, "vaults.json"), was = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : null
+    fs.writeFileSync(file, JSON.stringify({ vaults: [{ path: VAULT }, { path: dir }] }))
+    vr = await vh("GET", "", {})
+    check("vault names: the list names another vault by its nickname", vr.vaults.find((v: Any) => v.path === dir)?.name === "Lighthouse", vr)
+    check("vault names: nicknameAt reads none where there's no vault.json", await N.nicknameAt(other) === "")
+    if (was === null) fs.rmSync(file); else fs.writeFileSync(file, was)
+    fs.rmSync(other, { recursive: true })
+  }
+  const folder = path.basename(VAULT)
+  let [, st] = await api("GET", "state")
+  check("vault names: unnamed, the vault is its folder's name", st.vault.name === folder && st.vault.nickname === undefined, st.vault)
+  await api("PATCH", "config/vault", { name: "Lighthouse" })
+  ;[, st] = await api("GET", "state")
+  check("vault names: renamed, the state names it so, its folder as it was", st.vault.name === "Lighthouse" && st.vault.nickname === "Lighthouse" && fs.existsSync(VAULT), st.vault)
+  write(".vaultite/vault.json", JSON.stringify({ name: ["not", "text"] }))
+  ;[, st] = await api("GET", "state")
+  check("vault names: a name that isn't text is none", st.vault.name === folder, st.vault)
+  await api("PATCH", "config/vault", { name: null })
+  ;[, st] = await api("GET", "state")
+  check("vault names: null goes back to the folder's name", st.vault.name === folder && st.vault.nickname === undefined, st.vault)
 }

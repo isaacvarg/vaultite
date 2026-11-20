@@ -7,11 +7,11 @@ import { atExit } from "../exit.ts"
 const exec = promisify(execFile)
 export type Lease = { pid: number; started: string; what: string }
 
-/** A start time tells a process from a later one with its pid. null when it isn't running. */
-export async function processStart(pid: number): Promise<string | null> {
-  try { return (await exec("ps", ["-o", "lstart=", "-p", String(pid)])).stdout.trim() || null } catch { return null }
+export const startedIn = async (pid: number, env: NodeJS.ProcessEnv) => {
+  try { return (await exec("ps", ["-o", "lstart=", "-p", String(pid)], { env })).stdout.trim() || null } catch { return null }
 }
-
+/** ps tells a start in local time, which a trip changes. null when it isn't running. */
+export const processStart = (pid: number) => startedIn(pid, { ...process.env, TZ: "UTC" })
 export async function leaseIn(store: string, sha: string, l: { pid: number; what: string }) {
   const started = await processStart(l.pid)
   if (!started) throw new Error(`process ${l.pid} isn't running`)

@@ -26,6 +26,7 @@ import * as SC from "./statechunks.ts"
 import * as SP from "./statepatch.ts"
 import { coreOps } from "./coreops.ts"
 import { SETTINGS } from "./coreops/settings.ts"
+import { ownNickname, vaultName } from "./vaultname.ts"
 import { keptOf } from "./kept.ts"
 import { filing } from "./filing.ts"
 import { checkParams, didOf, entryOf, jsonBlock, nearest, type Op, type OpCtx, OpError, opsDoc, pathAsSaid, type Who, whoOf } from "./ops.ts"
@@ -35,7 +36,7 @@ import { hookOps } from "./hooks.ts"
 import { type Listed, Scheduler, scheduleOps, timed } from "./schedule.ts"
 import { digestOf, VaultPlugins } from "./vaultplugins.ts"
 import * as G from "./grants.ts"
-import { byUser, notHereYet, onItsOwn, overConnect, runHook, WriteRefused } from "./writegate.ts"
+import { byUser, logFailure, notHereYet, onItsOwn, overConnect, runHook, WriteRefused } from "./writegate.ts"
 import { asLocked, type Fetched, fetchSource, parseSource, readLock } from "./installs.ts"
 import { autoUpdates } from "./updates.ts"
 import { disclosuresOf, saysMore } from "./pluginmeta.ts"
@@ -44,6 +45,7 @@ import { API_VERSION, APP_VERSION } from "./version.ts"
 import { ConfigError, ConflictError, type Item, type Kind, NotFound, publicOf, requestWriter, Vault, type Writer } from "./vault.ts"
 import { isObj, strings } from "./values.ts"
 import { keepReads } from "./fmcache.ts"
+import type { ReadAhead } from "./readahead.ts"
 import { logger } from "./log.ts"
 
 const log = logger("app")
@@ -155,8 +157,13 @@ export class App {
 
   async syncPlugins({ pages: write = true, trusting = false } = {}) {
     const key = `${this.vault.heardCount}:${this.vault.settingsVersion}:${this.vaultPlugins.trust.version}:${this.index.version}`
-    if (trusting && this.pluginsSynced === key && this.vault.vouched()) return false
-    const changed = await this.loadPlugins()
+    if (trusting && this.pluginsSynced === key && this.vault.vouched(Infinity)) return false
+    let changed: boolean
+    try { changed = await this.loadPlugins() } catch (e) {
+      if (!notHereYet(e)) throw e
+      logFailure(log, "loading the vault's plugins", e)
+      return false
+    }
     this.pluginsSynced = key
     this.adopt()
     this.tellPaused()
@@ -307,7 +314,10 @@ export class App {
     if (same) return this.stated!.state
     const out: Item = {}
     await kept.readingFor(async () => { for (const p of this.plugins) Object.assign(out, await p.getState()) })
-    out.vault = { path: this.vault.path, problems: this.vault.problemList(), downloading: this.vault.downloading, ...(fs.existsSync(this.vault.abs(SANDBOX_MARKER)) ? { sandbox: true } : {}) }
+    const nickname = ownNickname(this.vault), vault: Item = { path: this.vault.path, name: vaultName(this.vault.path, nickname), problems: this.vault.problemList(), downloading: this.vault.downloading }
+    if (nickname) vault.nickname = nickname
+    if (fs.existsSync(this.vault.abs(SANDBOX_MARKER))) vault.sandbox = true
+    out.vault = vault
     out.files = F.tree(this.vault)
     out.vaultPlugins = this.vaultPlugins.list()
     out.app = { version: APP_VERSION, api: API_VERSION }
@@ -325,7 +335,7 @@ export class App {
     return out
   }
 
-  async stateSince(since: string, http?: IncomingMessage) {
+  async stateSince(since: string, http?: IncomingMessage): Promise<Text> {
     const mark = this.liveMark?.()
     const now = this.snap(await this.state())
     const v = JSON.stringify(now.v)
@@ -335,14 +345,15 @@ export class App {
       let patch = now.patches.get(since)
       if (patch === undefined) now.patches.set(since, patch = SP.patchOf(this.snaps.find((s) => s.v === since)!.piece, now.piece) ?? "null")
       out = `{"v":${v},"since":${JSON.stringify(since)},"patch":${patch}}`
+    } else if (since !== "0" && SC.sizeOf(now.piece) >= SC.WHOLE_UNDER) return this.stateManifest(http)
     // (kept as UTF-8 bytes: half a string's size when a character outside Latin-1 makes it two bytes a character)
-    } else out = now.whole ??= Buffer.from(`{"v":${v},"state":${SP.jsonOf(now.piece)}}`)
+    else out = now.whole ??= Buffer.from(`{"v":${v},"state":${SP.jsonOf(now.piece)}}`)
     const extra = [mark ? `"live":${JSON.stringify(mark)}` : "", http && CONNECT_HEADER in http.headers ? `"here":"connect"` : ""].filter(Boolean)
     if (extra.length) out = Buffer.concat([Buffer.from(`{${extra.join(",")},`), (typeof out === "string" ? Buffer.from(out) : out).subarray(1)])
     return new Text(out, "application/json")
   }
 
-  async stateManifest(http?: IncomingMessage) {
+  async stateManifest(http?: IncomingMessage): Promise<Text> {
     const mark = this.liveMark?.()
     const now = this.snap(await this.state())
     if (SC.sizeOf(now.piece) < SC.WHOLE_UNDER) return this.stateSince("0", http)
@@ -486,6 +497,8 @@ export class App {
       const via = <T>(fn: () => T) => (http && CONNECT_HEADER in http.headers ? overConnect(fn) : fn())
       return http ? await via(() => as(() => requestWriter.run(writer, go))) : await go()
     } catch (e) {
+      const known = errorReply(e)
+      if (known) { logFailure(log, "a request failed", e); return known }
       log.error("a request failed", e)
       return reply(500, { error: messageOf(e) })
     }
@@ -679,18 +692,19 @@ export class App {
 
   hold<T>(fn: () => Promise<T> | T, { trusting = false } = {}): Promise<T> {
     if (this.holding.getStore()?.on) return Promise.resolve().then(fn)
-    return this.vault.lock(async () => {
+    const walks = () => !trusting || !this.vault.filesVouched()
+    return (walks() ? this.vault.looked() : Promise.resolve(null)).then((pre) => this.vault.lock(async () => {
       const token = { on: true }
       try {
         return await this.holding.run(token, async () => {
-          if (!trusting || !this.vault.vouched()) await this.vault.sync()
+          await (walks() ? this.vault.sync(pre) : this.vault.settle())
           this.pagesOf = this.onKey()
-          try { return await fn() } finally { await this.loadPlugins().then(() => this.followPlugins(), (e) => log.error("loading the plugins failed", e)) }
+          try { return await fn() } finally { this.vault.doing = "loading the plugins"; await this.loadPlugins().then(() => this.followPlugins(), (e) => log.error("loading the plugins failed", e)) }
         })
       } finally {
         token.on = false
       }
-    })
+    }))
   }
 
   private async driveUi(message: Item | null) {
@@ -717,7 +731,7 @@ export class App {
     const t0 = performance.now()
     const end = this.reported("POST", `ops/${op.id}`, {}, who, opts.report)
     try {
-      const out = this.holding.getStore()?.on ? await run() : write && op.lock !== false ? await this.hold(run)
+      const out = this.holding.getStore()?.on ? await run() : write && op.lock !== false && !op.input ? await this.hold(run)
         : opts.synced ? await run() : await this.vault.synced({ trusting: serversOwn }).then(run)
       const text = op.text ? op.text(out.result, out.params, who) : typeof out.result === "string" ? out.result
         : jsonBlock(out.result ?? null)
@@ -878,14 +892,23 @@ export function jsonOf(body: unknown): string | Buffer {
   return data
 }
 
-export async function open(vaultPath: string, { start = true, timing, watch }: { start?: boolean; timing?: { mark(part: string): void }; watch?: (vault: Vault) => void } = {}) {
+function watched(vaultPath: string, kept: ReturnType<typeof keepReads> | null, watch?: (vault: Vault) => void, read?: ReadAhead) {
+  const opening = new App(vaultPath)
+  opening.vault.reading = kept ? read?.(vaultPath) ?? null : null
+  opening.vault.startTexts = kept?.texts ?? null
+  opening.vault.startRead = kept?.read ?? null
+  watch?.(opening.vault)
+  return { opening, looked: kept ? opening.vault.looked() : null }
+}
+
+export async function open(vaultPath: string, { start = true, timing, watch, read }: { start?: boolean; timing?: { mark(part: string): void }; watch?: (vault: Vault) => void
+  read?: ReadAhead } = {}) {
   fs.mkdirSync(vaultPath, { recursive: true })
   const fresh = start && !fs.existsSync(path.join(vaultPath, ".vaultite")), sandbox = start && newSandbox(vaultPath)
   const kept = start ? keepReads(vaultPath) : null
-  const app = await new App(vaultPath).init(timing)
-  app.vault.startTexts = kept?.texts ?? null
+  const { opening, looked } = watched(vaultPath, kept, watch, read)
+  const app = await opening.init(timing)
   if (fresh) B.markNew(app.vault)
-  watch?.(app.vault)
   if (start) {
     if (sandbox) allDone(app.vault)
     await migrate(app.vault, fresh)
@@ -894,11 +917,11 @@ export async function open(vaultPath: string, { start = true, timing, watch }: {
     app.tidyPluginLists()
     B.tidy(app.vault)
     await turn()
-    await app.vault.sync()
-    app.vault.startTexts = null
-    kept?.done()
+    await app.vault.lock(async () => app.vault.sync(await looked))
+    app.vault.startTexts = app.vault.startRead = app.vault.reading = null
+    kept?.done((rel) => app.vault.entries.get(rel)?.tags)
     timing?.mark("vault read")
-    if (fresh) await setUpNew(app.host()).catch((e) => log.error("setting up the new vault failed", e))
+    if (fresh) await app.hold(() => setUpNew(app.host()), { trusting: true }).catch((e) => log.error("setting up the new vault failed", e))
     app.moving = migrateMoved({ vault: app.vault, has: (id) => app.app.some((p) => p.id === id),
       install: (source) => installFrom(app, source, null, { moved: true }) }).catch((e) => log.error("installing the plugins that moved out of the app failed", e))
   }

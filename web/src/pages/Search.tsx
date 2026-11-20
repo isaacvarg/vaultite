@@ -12,29 +12,20 @@ import { useNearEnd } from "@/core/near"
 import { usePrefs } from "@/core/prefs"
 import { trackSoon } from "@/core/unsaved"
 import { useStateFor } from "@/core/statefor"
-import { search, useSearchIndex, type Hit } from "@/core/search"
+import { useBurst } from "@/core/burst"
+import { useSearchIndex } from "@/core/search"
+import type { Hit } from "@/core/namesearch"
 import { marked } from "@/components/Palette"
 import { menuBelow } from "@/components/ContextMenu"
-import { SearchHits, type Found, type Match, type Result } from "@/pages/SearchHits"
+import { SearchHits, type Match, type Result } from "@/pages/SearchHits"
+import { FIRST, firstOf, LINES, MOST_LINES, PAGE, statusOf, totalOf, useFirstScreen, useNames, type Shown } from "@/pages/searchload"
 import { usePane } from "@/core/pane"
-import { cn, plural } from "@/lib/utils"
+import { cn } from "@/lib/utils"
 import { explain, highlighter, isPlain, parse, type Node } from "../../../core/searchquery.ts"
 import { pluginSettings } from "@/core/pluginSettings"
 import { errorText } from "@/core/notify"
 
 type Settings = { matchCase?: boolean; sort?: string; collapse?: boolean; context?: number; explain?: boolean }
-
-const PAGE = 100, LINES = 20
-const MOST = 500, MOST_LINES = 100_000
-
-async function firstOf(params: string, n: number): Promise<Found> {
-  let out: Found | null = null
-  for (let at = 0; !out || (at < n && out.results.length === at); at += MOST) {
-    const f: Found = await get<Found>(`search?${params}&lines=${LINES}&total=1&offset=${at}&limit=${Math.min(MOST, n - at)}`)
-    out = out ? { ...f, results: [...out.results, ...f.results] } : f
-  }
-  return out
-}
 
 const SORTS: [string, string][] = [
   ["relevance", "Best match"], ["name", "File name (A to Z)"], ["name-desc", "File name (Z to A)"],
@@ -79,9 +70,9 @@ export function SearchPage({ store, query, setQuery }: { store: Store; query: st
   const nameMarks = useMemo(() => (node ? highlighter(node, "name") : () => []), [node])
 
   const docs = useSearchIndex(store)
-  const allNames = useMemo(() => (plain && !matchCase ? search(docs, q, Infinity) : []), [docs, q, plain, matchCase])
+  const allNames = useNames(docs, q, plain && !matchCase)
   const [allShown, setAllShown] = useStateFor([q], () => false)
-  const names = allShown ? allNames : allNames.slice(0, 8)
+  const names = useMemo(() => allNames.top(allShown ? Infinity : 8), [allNames, allShown])
 
   const context = settings.context ?? 0
   const params = useMemo(() => {
@@ -94,8 +85,9 @@ export function SearchPage({ store, query, setQuery }: { store: Store; query: st
     if (context) p.set("context", String(context))
     return p.toString()
   }, [q, node, plain, folder, matchCase, settings.sort, context])
-  const [found, setFound] = useStateFor<Found | null>([!params], () => null)
+  const [found, setFound] = useStateFor<Shown | null>([!params], () => null)
   const results = found?.results ?? null
+  const drawn = useFirstScreen(found, setFound, !!settings.collapse)
   const [failed, setFailed] = useStateFor([!params], () => "")
   const [busy, setBusy] = useState(false)
   const [whole, setWhole] = useStateFor<Record<string, Match[]>>([!params], () => ({}))
@@ -105,42 +97,38 @@ export function SearchPage({ store, query, setQuery }: { store: Store; query: st
     const rs = await get<Result[]>(`search?${params}&path=${encodeURIComponent(path)}&lines=${MOST_LINES}`)
     return rs[0]?.matches ?? []
   }, [params])
-  useEffect(() => {
-    if (!params) return
-    let on = true
+  useBurst(params ? (signal) => {
+    const on = () => !signal.aborted
     setBusy(true)
     const same = shownNow.current.of === params
-    const n = same ? Math.max(PAGE, shownNow.current.n) : PAGE
+    const n = same ? Math.max(FIRST, shownNow.current.n) : FIRST
     const open = same ? Object.keys(shownNow.current.whole) : []
     if (!same) setWhole({})
-    const off = trackSoon("the search's request", () => true)
-    const t = setTimeout(() => {
-      off()
-      firstOf(params, n)
-        .then(async (f) => {
-          const lines = await Promise.all(open.map(async (p) => [p, await wholeOf(p).catch(() => [])] as const))
-          if (!on) return
-          shownNow.current.of = params
-          setFound(f); setFailed(""); setBusy(false)
-          if (open.length) setWhole(Object.fromEntries(lines))
-        })
-        .catch((e) => { if (on) { setFound({ results: [], files: 0, lines: 0 }); setFailed(errorText(e)); setBusy(false) } })
-    }, 200)
-    return () => { on = false; off(); clearTimeout(t) }
-  }, [params, wholeOf, store, setFound, setFailed, setWhole])
+    firstOf(params, n, signal)
+      .then(async (rs) => {
+        const lines = await Promise.all(open.map(async (p) => [p, await wholeOf(p).catch(() => [])] as const))
+        if (!on()) return
+        shownNow.current.of = params
+        setFound((cur) => (same && cur ? { ...cur, results: rs } : { results: rs, fresh: true })); setFailed(""); setBusy(false)
+        if (open.length) setWhole(Object.fromEntries(lines))
+        const total = await totalOf(params, signal)
+        if (on()) setFound((cur) => cur && { ...cur, ...total })
+      })
+      .catch((e) => { if (on()) { setFound({ results: [], files: 0, lines: 0 }); setFailed(errorText(e)); setBusy(false) } })
+  } : null, [params, wholeOf, store, setFound, setFailed, setWhole], "the search's request")
   const loading = useRef("")
   const more = () => {
-    if (!found || busy || found.results.length >= found.files) return
+    if (!found || busy || found.results.length >= (found.files ?? 0)) return
     const key = `${params}@${found.results.length}`
     if (loading.current === key) return
     loading.current = key
-    get<Found>(`search?${params}&lines=${LINES}&total=1&offset=${found.results.length}&limit=${PAGE}`)
-      .then((f) => setFound((cur) => (cur && shownNow.current.params === params && cur.results.length === found.results.length
-        ? { ...f, results: [...cur.results, ...f.results] } : cur)))
+    get<Result[]>(`search?${params}&lines=${LINES}&offset=${found.results.length}&limit=${PAGE}`)
+      .then((rs) => setFound((cur) => (cur && shownNow.current.params === params && cur.results.length === found.results.length
+        ? { ...cur, results: [...cur.results, ...rs] } : cur)))
       .catch(() => { loading.current = "" })
   }
   const end = useRef<HTMLParagraphElement>(null)
-  useNearEnd(end, more, `${found?.results.length}:${busy}`, "800px")
+  useNearEnd(end, more, `${found?.results.length}:${found?.files}:${busy}`, "800px")
   const showWhole = (path: string) => {
     wholeOf(path).then((ms) => { if (shownNow.current.params === params) setWhole((w) => ({ ...w, [path]: ms })) }, () => {})
   }
@@ -176,8 +164,6 @@ export function SearchPage({ store, query, setQuery }: { store: Store; query: st
     { label: "Explain search terms", checked: !!settings.explain, run: () => save({ explain: settings.explain ? null : true }) },
   ])
 
-  const total = found?.lines ?? 0
-  const lines = total > 0
   const tool = "grid size-6 shrink-0 cursor-pointer place-items-center rounded-[4px] text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground max-md:size-9"
   return (
     <div data-search-view data-keylist className="flex flex-col gap-4">
@@ -239,10 +225,10 @@ export function SearchPage({ store, query, setQuery }: { store: Store; query: st
                 <span className="shrink-0 text-[12px] text-tertiary">{h.kind}</span>
               </button>
             ))}
-            {!allShown && allNames.length > names.length && (
+            {!allShown && allNames.total > names.length && (
               <button type="button" data-keyrow onClick={() => setAllShown(true)}
                 className="flex h-7 cursor-pointer items-center rounded-[5px] px-1.5 text-left text-[12px] text-primary hover:bg-foreground/[0.05] max-md:h-11 max-md:text-[15px]">
-                Show all {allNames.length}
+                Show all {allNames.total}
               </button>
             )}
           </div>
@@ -253,16 +239,15 @@ export function SearchPage({ store, query, setQuery }: { store: Store; query: st
         <section aria-label="In files">
           <h2 className="mb-1 flex items-baseline gap-2 text-[12px] font-semibold text-muted-foreground">
             {plain ? "In files" : "Files"}
-            <span className="font-normal">{failed || (!results || (busy && !results.length) ? <span className="shimmer" aria-busy>Searching…</span> : !results.length ? "Nothing found"
-              : lines ? `${plural(total, "line")} in ${plural(found!.files, "file")}` : plural(found!.files, "file"))}</span>
+            <span className="font-normal">{failed || (statusOf(found, busy) ?? <span className="shimmer" aria-busy>Searching…</span>)}</span>
           </h2>
           <div className="flex flex-col gap-1">
-            {results?.map((r) => (
+            {drawn?.map((r) => (
               <SearchHits key={r.path} r={r} store={store} shown={whole[r.path] ?? r.matches ?? []} shut={!!settings.collapse !== toggled.has(r.path)}
                 onToggle={() => setToggled((s) => { const n = new Set(s); if (n.has(r.path)) n.delete(r.path); else n.add(r.path); return n })}
                 marks={marks} nameMarks={nameMarks} context={context} pane={pane} onMore={() => showWhole(r.path)} />
             ))}
-            {found && found.results.length < found.files && (
+            {found?.files !== undefined && found.results.length < found.files && (
               <p ref={end} className="px-1.5 py-1 text-[12px] text-tertiary">{found.files - found.results.length} more files…</p>
             )}
           </div>

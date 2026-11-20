@@ -1,6 +1,6 @@
 import { lazy, Suspense, useEffect, useState, useSyncExternalStore } from "react"
 import { AudioLines, Check, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, CircleDashed, Clock, CircleDot, CirclePause, CircleStop, Columns2, CornerDownRight, ExternalLink, Image, Mic, Pencil, Rows2, SquareArrowOutUpRight, X } from "lucide-react"
-import { addDays, Button, cn, Empty, errorText, HeadingButton, fmtLongDay, fmtStamp, isDesktop, Loading, menuFor, type MenuItem, notifyError, op, openInSplit, openTab, Panel, today, useTick } from "@vaultite"
+import { Arriving, addDays, Button, cn, Empty, errorText, HeadingButton, fmtLongDay, fmtStamp, isDesktop, Loading, menuFor, type MenuItem, notifyError, op, openInSplit, openTab, Panel, today, useTick } from "@vaultite"
 import type { Exchange, PressLine, Spent } from "./conversation"
 import { getState, subscribe } from "./live"
 
@@ -105,7 +105,7 @@ export function Turn({ e, compact }: { e: Exchange; compact?: boolean }) {
 }
 
 const Chips = lazy(() => import("./Drawn"))
-const Drawings = (p: { e: Exchange; compact?: boolean }) => p.e.drawings && <Suspense><Chips {...p} /></Suspense>
+const Drawings = (p: { e: Exchange; compact?: boolean }) => p.e.drawings && <Suspense fallback={<Arriving />}><Chips {...p} /></Suspense>
 
 const asked = (e: Exchange) => e.text || (e.kind === "point" ? "Look at this" : "")
 type Reacted = { icon: typeof Pencil; word: string }

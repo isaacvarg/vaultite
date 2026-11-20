@@ -26,7 +26,7 @@ try {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } })
   const page = watch(await ctx.newPage(), { console: true, ignore: /favicon|Failed to load resource|WebSocket/ }), ui = app(page)
   await page.goto(B)
-  await page.waitForSelector("[aria-label='New tab']", { timeout: 30000 })
+  await page.waitForSelector("[aria-label='New tab']", { timeout: 30000 }); await ui.saved()
   await page.evaluate((l) => localStorage.setItem("vaultite.tabs", JSON.stringify(l)), layout)
   await page.goto("about:blank"); await page.goto(`${B}#file/${encodeURIComponent(notes[1])}`)
   await page.waitForSelector("[data-tab-id='tx']", { timeout: 30000 }); await ui.idle()

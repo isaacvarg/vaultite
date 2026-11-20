@@ -2,7 +2,8 @@ import { spawn } from "node:child_process"
 import fs from "node:fs"
 import path from "node:path"
 import { z } from "zod"
-import { type Cdp, chromePath, headless } from "../../../core/headless.ts"
+import { type Cdp, chromePath, headless, open } from "../../../core/headless.ts"
+import { messageOf } from "../../../core/values.ts"
 import type { Do, Step, Tour } from "./tour.ts"
 import { FLIPS, holdMs } from "./proof.ts"
 
@@ -137,10 +138,7 @@ export async function recordProof(o: { url: string; tour: Pick<Tour, "title" | "
     const p = browser.page
     await p.send("Page.enable"); await p.send("Runtime.enable")
     await p.send("Emulation.setDeviceMetricsOverride", { ...SIZE, deviceScaleFactor: 1, mobile: false })
-    const loaded = new Promise<void>((ok) => p.on("Page.loadEventFired", () => ok()))
-    const nav = await p.send("Page.navigate", { url: o.url })
-    if (nav.errorText) throw new Error(`couldn't open ${o.url}: ${nav.errorText} (is its server running?)`)
-    await Promise.race([loaded, sleep(15_000)])
+    try { await open(p, o.url) } catch (e) { throw new Error(`${messageOf(e)} (is its server running?)`) }
     const js = async (expr: string) => {
       const r = Evaluated.safeParse(await p.send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true })).data ?? {}
       if (r.exceptionDetails) throw new Error(`the page: ${r.exceptionDetails.text}`)

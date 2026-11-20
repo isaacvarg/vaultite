@@ -512,6 +512,27 @@ export default async ($: VaultTest) => {
       const push = await import("../../../plugins/core/inbox/push.ts")
       const p = push.payload({ title: "Claude Code is waiting for you", body: "Bash", category: "permission", thread: "claude-x", urgent: true, data: { event: "e1" } })
       check("push: the payload carries its buttons' category and the event", p.aps.category === "permission" && p.aps["interruption-level"] === "time-sensitive" && p.aps["thread-id"] === "claude-x" && "event" in p && p.event === "e1" && p.aps.alert.body === "Bash", p)
+      {
+        const http2 = await import("node:http2"), { portOf } = await import("../../../core/listening.ts")
+        let sessions = 0, streams = 0
+        const fake = http2.createServer()
+        fake.on("session", () => { sessions++ })
+        fake.on("stream", (s) => {
+          streams++
+          if (streams === 3) return s.session?.destroy()
+          if (streams === 5) return
+          s.respond({ ":status": 200 }); s.end()
+        })
+        await new Promise<void>((r) => fake.listen(0, "127.0.0.1", () => r()))
+        const at = `http://127.0.0.1:${portOf(fake)}`, h = { ":method": "POST", ":path": "/3/device/ab" }
+        const a = await push.apnsPostTriedTwiceUnanswered(at, h, "{}"), b2 = await push.apnsPostTriedTwiceUnanswered(at, h, "{}")
+        check("push: notifications share one connection to APNs", a.status === 200 && b2.status === 200 && sessions === 1, [a, b2, sessions])
+        const c = await push.apnsPostTriedTwiceUnanswered(at, h, "{}")
+        check("push: a dropped connection is tried again on a new one", c.status === 200 && sessions === 2 && streams === 4, [c, sessions, streams])
+        const d = await push.apnsPostTriedTwiceUnanswered(at, h, "{}", {}, 300)
+        check("push: no answer is tried again on a new connection", d.status === 200 && sessions === 3 && streams === 6, [d, sessions, streams])
+        fake.close()
+      }
       ;[st, b] = await api("POST", "inbox/devices", { token: "nothex", topic: "app.example.ios" })
       check("push: a device needs a token", st === 400, [st, b])
       ;[st, b] = await api("POST", "inbox/devices", { token: "AB".repeat(32), topic: "app.example.ios", env: "sandbox", name: "Sam's iPhone" })
@@ -809,6 +830,7 @@ export default async ($: VaultTest) => {
       const out = await vau("inbox", "report", "Handed off", "--work", "fix", "--tldr", "Did it.", "--summary", "Did it.", "--terminal", "claude-handed1")
       check("handed: its report says the terminal ends with the turn", out.code === 0 && out.out.includes("this terminal ends when this turn does"), out)
       await api("POST", "inbox/hook?agent=claude&terminal=claude-handed1", { hook_event_name: "Stop" })
+      await settled()
       check("handed: the turn that reported ends it", !handedOf().includes("claude-handed1"), handedOf())
       await api("POST", "ops/inbox.report", { title: "Not handed", work: "fix", tldr: "Did it.", summary: "Did it.", terminal: "claude-mine1", agent: "claude" })
       await api("POST", "inbox/hook?agent=claude&terminal=claude-mine1", { hook_event_name: "Stop" })
@@ -1182,14 +1204,12 @@ export default async ($: VaultTest) => {
     const [, ev] = await api("POST", "inbox/events", { source: "vau", kind: "info", title: "Look at this later" })
     let [st] = await api("POST", "inbox/events/snooze", { ids: [ev.event.id], until: Date.now() - 1 })
     check("inbox events snooze: a time to come", st === 400, st)
-    // (its time is what was asked, not later than the read: a slow runner's read may come after it)
-    const until = Date.now() + 200
+    const until = Date.now() + 60_000
     ;[st] = await api("POST", "inbox/events/snooze", { ids: [ev.event.id], until })
     let [, l] = await api("GET", "inbox/events")
     let e = l.events.find((x: Any) => x.id === ev.event.id)
     check("inbox events snooze: still open, out of the lists meanwhile, with its time", st === 200 && e.state === "open" && e.snoozed === until, e)
-    await sleep(Math.max(0, until - Date.now()) + 50)
-    await wake()
+    await wake(until)
     ;[, l] = await api("GET", "inbox/events")
     e = l.events.find((x: Any) => x.id === ev.event.id)
     check("inbox events snooze: its time come, unread on top and told again", l.events[0].id === ev.event.id && e.read === false && !e.snoozed && e.nt === e.t, e)

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 import { lineReader } from "../lines.ts"
 import { host, type Conn } from "./host.ts"
 import { ptyDir } from "./spawnhelper.ts"
-import { PROTOCOL } from "./protocol.ts"
+import { oldSocket, PROTOCOL } from "./protocol.ts"
 import { holdRoot } from "../../../../core/update/lease.ts"
 
 const SOCK = process.argv[2]
@@ -29,7 +29,7 @@ void holdRoot(SELF, "termd")
 /** node-pty runs spawn-helper by its path in the checkout: once that moved, no shell can start. */
 const stale = () => !fs.existsSync(SELF) || !fs.existsSync(ptyDir)
 
-const h = host({ log, pid: process.pid, file: SELF, stale, retire: () => retire(), changed: () => idleCheck() })
+const h = host({ log, pid: process.pid, file: SELF, stale, retire: () => retire(), handOver: () => handOver(), changed: () => idleCheck() })
 
 let lastConn = Date.now()
 const LIVE = /-vaultite\.sock$/.test(path.basename(FILES))
@@ -67,8 +67,25 @@ function retire() {
   log(`retiring: this server's files are gone (${SELF})`)
   h.killAll()
   removeFiles()
-  server.close()
+  // Node unlinks the path it bound at, by then the next server's.
+  if (!handed) server.close()
   setTimeout(() => { for (const s of sockets) s.destroy(); process.exit(0) }, 200)
+  return true
+}
+
+let listeningAt = SOCK
+let handed = false
+function handOver() {
+  if (handed) return true
+  if (WIN) return false
+  const aside = oldSocket(SOCK, process.pid)
+  const socketPathMax = process.platform === "darwin" ? 103 : 107
+  if (Buffer.byteLength(aside) > socketPathMax) return false
+  try { fs.renameSync(SOCK, aside) } catch (e) { log("couldn't move its socket aside to hand over:", e); return false }
+  handed = true
+  listeningAt = aside
+  fs.rmSync(`${FILES}.pid`, { force: true })
+  log(`handing over: this server's files are gone (${SELF}): the next one adopts its ${h.sessions.size} terminals from ${aside}`)
   return true
 }
 
@@ -97,7 +114,8 @@ const server = net.createServer((sock) => {
 
 /** Windows removes a pipe with its server. */
 function removeFiles() {
-  for (const f of [...(WIN ? [] : [SOCK]), `${FILES}.pid`]) try { fs.rmSync(f, { force: true }) } catch { /* gone */ }
+  const pidFile = handed ? [] : [`${FILES}.pid`]
+  for (const f of [...(WIN ? [] : [listeningAt]), ...pidFile]) try { fs.rmSync(f, { force: true }) } catch { continue }
 }
 
 function start() {

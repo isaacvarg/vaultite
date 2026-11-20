@@ -204,10 +204,10 @@ export function Loading({ error, retry, className }: { error?: ReactNode; retry?
   return <p className={cn("loading-in text-[15px] leading-[20px] text-muted-foreground", className)} aria-busy><span className="shimmer">Loading…</span></p>
 }
 
-/** Suspense's fallback for code on its way: React shows what came up to 300 ms after it does. */
+/** Suspense's fallback for code on its way (`className`: the room it keeps): React shows what came up to 300 ms after it does. */
 export function Arriving({ className }: { className?: string }) {
   useEffect(() => trackSoon("code on its way", () => true), [])
-  return <div className={className} />
+  return className ? <div className={className} /> : null
 }
 
 /** A line of text still to come, inside the element that will hold it, so it takes that line's height (`w`: its width). */
@@ -381,7 +381,7 @@ export function Segmented<T extends string>({ value, options, onChange, label, b
         return (
           <button key={o.value} type="button" role="radio" aria-checked={on} data-option={o.value} {...o.attrs} onClick={() => { if (!on) haptic("selection"); onChange(o.value) }}
             className={cn(
-              "relative flex flex-1 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap transition-[background,box-shadow] duration-200",
+              "relative flex flex-1 cursor-pointer items-center justify-center gap-1.5 whitespace-nowrap transition-[background,box-shadow] duration-(--motion)",
               small ? "h-6.5 rounded-[6px] px-2.5 text-[12.5px]" : "min-h-8 rounded-[7px] px-4 text-[13px]",
               big && "max-md:min-h-10 max-md:text-[15px]",
               on ? cn("bg-card font-semibold dark:bg-[var(--segment-on)]", small ? "shadow-[0_1px_3px_rgb(0_0_0/0.12)]" : "shadow-[0_3px_8px_rgb(0_0_0/0.12),0_3px_1px_rgb(0_0_0/0.04)]")

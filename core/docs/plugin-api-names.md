@@ -65,6 +65,7 @@ Every name a plugin imports, with its parameters and what it is (tools/plugin_ap
 - `archivedTabs()`: The archived tabs, the latest first.
 - `archiveTwin(rel)`: The same path archived or not: People/Kai.md <-> People/.archive/Kai.md.
 - `archiveUnseen(title)`: Archive the tabs unseen for longer than the setting says (none while it's Never), named by `title` as their tab is.
+- `Arriving({ className })`: Suspense's fallback for code on its way (`className`: the room it keeps): React shows what came up to 300 ms after it does.
 - `askAbout(question, file?)`: Hand a question about a file to the AI chat a plugin that's on brings (its `ask`); false when there's none.
 - `askedAt(id)`: When the user asked for terminal `id`, if this page made it (for its opening's span).
 - `askMicrophone()`: Before recording: in the desktop app, macOS's permission for the microphone (false: refused).
@@ -191,7 +192,7 @@ Every name a plugin imports, with its parameters and what it is (tools/plugin_ap
 - `DiffLine`: Kept, only in the second text (add), only in the first (del), or `n` unchanged lines folded away (gap).
 - `diffLines(a, b)`: How to turn a into b (textedit's opcodes), never a wrong diff at any size.
 - `DiffRows({ lines })`: The diff's lines, only those in sight drawn (a file of a million lines scrolls like a short one), wherever it scrolls.
-- `dismissNotice(id)`: Close a toast before its time.
+- `dismissNotice(id)`
 - `dockAtEnd(key, side)`: Put panels at a sidebar's end, unfolded, the sidebar open: every move but a drop does, so where they went is in sight.
 - `DockedFile({ store, path, panel })`
 - `DockedViewToggle({ store, path, panel })`
@@ -278,7 +279,7 @@ Every name a plugin imports, with its parameters and what it is (tools/plugin_ap
 - `formatSize(n)`: "24 KB"
 - `Frame({ mode, className, children })`: A picture's box, in the colour scheme in use (`mode`: light or dark, else the app's).
 - `freeName(t, folder, base, ext?)`: A name for a file or folder that isn't taken in its folder ("Untitled", "Untitled 1"...: Obsidian's rule).
-- `get(path)`
+- `get(path, signal?)`
 - `getDefaultPlace()`
 - `getStore()`: The store as it is now (for code outside React).
 - `getTabLayout()`
@@ -851,6 +852,7 @@ Every name a plugin imports, with its parameters and what it is (tools/plugin_ap
 - `usePatched(path, version?)`: useLive for an answer the server keeps frozen (the graph), asked again on `version` and its plugin's changes as a patch of the one it has (?patch=<v>, core/app.ts patched): only what changed…
 - `usePendingKeys()`: The sequence under way (its steps so far), or null: for the keys hint.
 - `usePluginSettings(id)`: A plugin's settings (its data.json), followed live: null while they load, {} when there are none; `set` writes those keys (null removes one), shown at once and put back if the write fails.
+- `usePluginsVersion()`
 - `usePortalHost(id)`: The element with id `id` (a bar left for a portal: #sheet-bar), found as it renders so the portal is there in the same frame (a view transition's picture takes it at once); one more render if it…
 - `usePreview()`: Drawn in a plugin's preview (made-up data, nothing fetched or written).
 - `useQuerySuggest(value, set, own?)`: A search query's field (core/searchquery.ts): its operators, then the vault's tags, types and folders.
@@ -909,6 +911,7 @@ Every name a plugin imports, with its parameters and what it is (tools/plugin_ap
 - `WebSite`
 - `WeeksGrid({ tip, tint, goal, weeks, onOpen })`
 - `weekStart(s)`
+- `whenIdle(fn, timeout?)`
 - `WIKI`
 - `withGroupFolded(l, id, collapsed?)`
 - `withMyTabs(w)`: Workspace `w` (saved elsewhere: another window, another device) with this window's own tabs: the main window's list and which pop-outs there are (it opens and closes them), or a pop-out's list.
@@ -1010,6 +1013,7 @@ Every name a plugin imports, with its parameters and what it is (tools/plugin_ap
 - `OpsHost`: What the core gives plugins for operations and events (the App sets it for its vault: core/app.ts `host`).
 - `outliving(cmd, args, name)`: Under a systemd unit (`vau service` on Linux) restarting it kills its whole cgroup, detached children too (launchd leaves a new session alone): what a process that must outlive the server runs as,…
 - `outsidePath(p)`: An outside path the app may read (its bytes, its info), or a 404.
+- `pageFiles(vaultOrMachinePaths, absInVault, refusal?)`
 - `pageText(type, body)`: A page's bytes as text, in the charset its header (`type`) or its <meta> names, else UTF-8.
 - `parseCsv(text)`: Rows of fields.
 - `parseDate(text, fmt, opts?)`: The date `text` names in a moment.js format (a week's first day), or null if the format doesn't write it ("2026-13-01" in YYYY-MM-DD); `loose`: what the text starts with, read as moment does.
@@ -1114,7 +1118,7 @@ Every name a plugin imports, with its parameters and what it is (tools/plugin_ap
 - `effectiveType(kindType, fm)`: A file's type: its kind's (`kindType`, when a kind owns the file), else its frontmatter `type` when that's text, else a plugin's mark on it.
 - `Entry`
 - `extract(text, anchor)`: What an embed shows: the whole text, a heading's section (`Heading`) or a block (`^id`, its id taken off); null if the anchor isn't there.
-- `fetchFromICloud(p, e)`
+- `fetchFromICloud(p, e, { asked }?)`
 - `FileCreateHook`: onCreateFile's hooks (Vault.onCreateFile): told of a new file that isn't Markdown; they never change its bytes.
 - `FM`
 - `formatInput(abs, rel)`: A file as a plugin's reader of its format gets it (the services `text:<ext>`): its text, or for a file that isn't text (a workbook, a Word document, a book: core/filetypes.ts's "binary") its bytes.
@@ -1133,6 +1137,7 @@ Every name a plugin imports, with its parameters and what it is (tools/plugin_ap
 - `linkKey(e)`: What a [[link]] finds a note by, past its path: its aliases, and whether it's archived (Vault.linkNames).
 - `loadFm(raw)`: Frontmatter text -> a record.
 - `localStamp(d?)`: Local "YYYY-MM-DD HHMMSS", for names of trashed files.
+- `Looked`
 - `mergeFm(existing, owned)`: The keys a kind owns, in its order (blank ones dropped), then every other key the file already had.
 - `MoveHook`: onMove's hooks (Vault.onMove): `to` null when trashed, then `trashed` is its path in .trash.
 - `ms(ns)`
@@ -1165,7 +1170,7 @@ Every name a plugin imports, with its parameters and what it is (tools/plugin_ap
 - `sortBy(xs, key, reverse?)`: Sort by a key, like Python's sorted(key=..., reverse=...): stable either way.
 - `splitTags(s)`
 - `stamp(d)`: "YYYY-MM-DD HH:MM:SS" in this machine's time (the vault's times are the user's local ones, as they read them).
-- `statFrom(st)`
+- `statFrom(st)`: What the index keeps of a file's stat.
 - `stemOf(rel)`
 - `str(v)`: A value as text, the way the app always showed it (null is "", booleans True/False as YAML read them).
 - `tagName(t)`: A tag written the way it's matched: no #, no slashes at its ends.

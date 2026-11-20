@@ -94,6 +94,15 @@ export async function desktopApp() {
   return { executablePath: dev.exe(shell), args: [], env: { VAULTITE_CODE_ROOT: ROOT } }
 }
 
+export async function pageNotLastScreen(app, ms = 30_000) {
+  for (const end = Date.now() + ms; Date.now() < end;) {
+    const w = app.windows().find((x) => x.url().startsWith("http"))
+    if (w) return w
+    await app.waitForEvent("window", { timeout: 1000 }).catch(() => {})
+  }
+  throw new Error(`the app showed no page of its own in ${ms / 1000} s`)
+}
+
 /** Whether the user's own app runs here, hearing their keys (electron/helper.ts' lock): `live` scripts then skip. */
 export function userApp() {
   return new Promise((done) => {

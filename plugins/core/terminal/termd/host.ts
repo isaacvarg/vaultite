@@ -7,6 +7,7 @@ import { keysBytes } from "../keys.ts"
 import { REPLY, watcher, type Said } from "../osc7501.ts"
 import { adopter } from "./adopt.ts"
 import { KittyFeed, remoteFront } from "./kitty.ts"
+import { decodeElsewhere } from "./pictures.ts"
 import { Screen } from "./screen.ts"
 import { fixHelper } from "./spawnhelper.ts"
 import { z } from "zod"
@@ -105,7 +106,8 @@ export class Session {
     this.meta = { ...x.meta }
     if (x.created) this.created = x.created
     this.term = this.screen(x.cols, x.rows, x.scrollback > 0 ? x.scrollback : SCROLLBACK)
-    this.kitty = new KittyFeed({ emit: (d) => this.take(d), log: (...a) => this.h.log(...a, this.id),
+    const log = (...a: unknown[]) => this.h.log(...a, this.id)
+    this.kitty = new KittyFeed({ emit: (d) => this.take(d), log, work: decodeElsewhere(log),
       remote: () => { try { return remoteFront(this.driver.process()) } catch { return true } } })
   }
 
@@ -134,7 +136,7 @@ export class Session {
       ...(this.exit ? { exit: this.exit } : {}), ...(this.driver.via ? { via: this.driver.via } : {}) }
   }
 
-  output(d: string) { this.kitty.feed(d) }
+  output(d: string) { this.kitty.feed(d); if (this.kitty.waiting > HOLD) this.hold() }
   private take(d: string) {
     this.activity = Date.now()
     this.queued += d
@@ -159,7 +161,7 @@ export class Session {
   }
 
   hold() {
-    const full = this.queued.length + this.term.inflight > HOLD || [...this.attached].some((c) => c.backlog() + (c.held?.bytes ?? 0) > HOLD)
+    const full = this.queued.length + this.term.inflight + this.kitty.waiting > HOLD || [...this.attached].some((c) => c.backlog() + (c.held?.bytes ?? 0) > HOLD)
     if (full === this.held) return
     this.held = full
     try { if (full) this.driver.pause(); else this.driver.resume() } catch { /* ended */ }
@@ -211,6 +213,7 @@ export type HostOptions = {
   log: (...a: unknown[]) => void
   pid: number; file: string
   stale?: () => boolean; retire?: () => boolean
+  handOver?: () => boolean
   changed?: () => void
 }
 
@@ -218,6 +221,7 @@ export type Host = ReturnType<typeof host>
 
 export function host(o: HostOptions) {
   const sessions = new Map<string, Session>()
+  let handedOver = false
   const conns = new Set<Conn>()
   const endedOnes = new Map<string, { info: Info; session: Session | null; text: string; told: boolean; trimming?: boolean }>()
   const dropStatus = new WeakMap<Session, () => void>()
@@ -263,7 +267,7 @@ export function host(o: HostOptions) {
     try { p = spawn() } catch (e) {
       if (o.stale?.()) {
         o.log("create", id, "failed: this server's files are gone", e)
-        if (o.retire?.()) throw new Failure(`this terminal server's files are gone (${o.file}): ask the next one`, "retiring")
+        if (o.retire?.() || (handedOver ||= !!o.handOver?.())) throw new Failure(`this terminal server's files are gone (${o.file}): ask the next one`, "retiring")
         throw new Error(`this terminal server's files are gone (${o.file}), and it still holds terminals: ${why(e)}`)
       }
       if (noPty(e)) throw outOfPtys(id, e)
@@ -318,7 +322,7 @@ export function host(o: HostOptions) {
       return null
     }
     switch (m.op) {
-      case "hello": return { v: PROTOCOL, pid: o.pid, file: o.file, stale: !!o.stale?.(), pictures: true }
+      case "hello": return { v: PROTOCOL, pid: o.pid, file: o.file, stale: !!o.stale?.(), pictures: true, handedOver }
       case "subscribe": {
         c.events = true
         for (const e of endedOnes.values()) if (!e.told && e.info.exit) { e.told = true; c.send({ t: "event", type: "exited", id: e.info.id, exit: e.info.exit }) }

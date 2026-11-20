@@ -20,23 +20,49 @@ export function changes(before: string[], after: string[]) {
   return [...added.filter(both).map((l) => `~ ${l}`), ...added.filter((l) => !both(l)).map((l) => `+ ${l}`), ...gone.filter((l) => !both(l)).map((l) => `- ${l}`)]
 }
 
+const PENDING = /"[^"]{0,40}\b(?:loading|saving|sending|uploading|processing|updating|syncing|searching|submitting|signing in|redirecting|preparing|generating|fetching)\b[^"]{0,40}(?:…|\.\.\.)"/i
+export const saysPending = (line: string) => PENDING.test(line)
+
 const AROUND_CONTENT = /^\s*- (navigation|banner|contentinfo|complementary)\b/
-export function mainLines(lines: string[]) {
-  const depth = (l: string) => l.length - l.trimStart().length
-  const at = lines.findIndex((l) => /^\s*- main\b/.test(l))
-  if (at >= 0) {
-    const d = depth(lines[at]), end = lines.findIndex((l, i) => i > at && depth(l) <= d)
-    return lines.slice(at + 1, end < 0 ? undefined : end).map((l) => l.slice(d + 2))
-  }
+const FOOTER = /^- (contentinfo|sectionfooter)\b/
+const depthOf = (l: string) => l.length - l.trimStart().length
+function without(lines: string[], around: (l: string) => boolean) {
   const out: string[] = []
-  const root = /^- RootWebArea\b/.test(lines[0] ?? "")
   let skip = -1
-  for (const l of root ? lines.slice(1) : lines) {
-    if (skip >= 0 && depth(l) > skip) continue
-    skip = AROUND_CONTENT.test(l) ? depth(l) : -1
-    if (skip < 0) out.push(root ? l.slice(2) : l)
+  for (const l of lines) {
+    if (skip >= 0 && depthOf(l) > skip) continue
+    skip = around(l) ? depthOf(l) : -1
+    if (skip < 0) out.push(l)
   }
   return out
+}
+export function oneLineLists(lines: string[]) {
+  const out: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    out.push(lines[i])
+    if (!/^\s*- combobox\b/.test(lines[i])) continue
+    const d = depthOf(lines[i]), names: string[] = []
+    let j = i + 1, more = ""
+    for (; j < lines.length && depthOf(lines[j]) > d; j++) {
+      const m = depthOf(lines[j]) === d + 2 ? /^\s*- (?:option ("[^"]*")|… (\d+) more options)/.exec(lines[j]) : null
+      if (!m) break
+      if (m[1]) names.push(m[1]); else more = m[2]
+    }
+    if (!names.length || (j < lines.length && depthOf(lines[j]) > d)) continue
+    out.push(`${" ".repeat(d + 2)}- options: ${names.join(" | ")}${more ? ` | … ${more} more` : ""}`)
+    i = j - 1
+  }
+  return out
+}
+export function mainLines(lines: string[]) {
+  const at = lines.findIndex((l) => /^\s*- main\b/.test(l))
+  if (at >= 0) {
+    const d = depthOf(lines[at]), end = lines.findIndex((l, i) => i > at && depthOf(l) <= d)
+    const inside = lines.slice(at + 1, end < 0 ? undefined : end).map((l) => l.slice(d + 2))
+    return inside.length ? without(inside, (l) => FOOTER.test(l)) : [lines[at].slice(d)]
+  }
+  const root = /^- RootWebArea\b/.test(lines[0] ?? "")
+  return without(root ? lines.slice(1) : lines, (l) => AROUND_CONTENT.test(l)).map((l) => (root ? l.slice(2) : l))
 }
 
 export type AXValue = { value?: unknown }
@@ -68,7 +94,7 @@ export function axLines(nodes: AXNode[], r: Refs, filled: (id: number) => boolea
     if (!node || size > MAX_TREE) return []
     const role = text(node.role), name = text(node.name).slice(0, 200)
     const secret = !!node.backendDOMNodeId && filled(node.backendDOMNodeId)
-    const shown = !node.ignored && !SKIP.has(role) && !(role === "StaticText" && !name)
+    const shown = !node.ignored && !SKIP.has(role) && !(role === "StaticText" && !name) && !(role === "ListMarker" && /^[•◦▪▫‣⁃·*-]?$/.test(name))
     const under = (d: number, s: string | true) => (secret ? [] : (node.childIds ?? []).flatMap((c) => walk(byId.get(c), d, s)))
     if (!shown) return under(depth, said)
     if (role === "StaticText") {

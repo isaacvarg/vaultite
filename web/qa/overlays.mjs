@@ -8,7 +8,7 @@ import fs from "node:fs"
 import http from "node:http"
 import os from "node:os"
 import path from "node:path"
-import { ROOT, qa, uiAt, until, wait } from "./lib/qa.mjs"
+import { ROOT, pageNotLastScreen, qa, uiAt, until, wait } from "./lib/qa.mjs"
 
 const { args: [VAULT], check, errs, watch, done } = await qa(import.meta.url, { chrome: false })
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "vau-overlays-"))
@@ -149,7 +149,7 @@ try {
   await app.evaluate(({ app: a }) => a.quit())
   await closed
   app = await launch()
-  win = await app.firstWindow()
+  win = await pageNotLastScreen(app)
   watch(win, { console: true, fail: false })
   await win.waitForSelector("aside[data-side=right], main", { timeout: 60000 })
   check("after a quit, the Browser's tabs come back", (await tabs()).includes(`view:web/${SITE}`), await tabs())

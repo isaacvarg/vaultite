@@ -5,6 +5,7 @@ import { post } from "@/core/http"
 import { notifyError } from "@/core/notify"
 import { signal } from "@/core/signal"
 import { ARCHIVE_DIR } from "../../../core/fileprops.ts"
+import { Arriving } from "@/components/kit"
 
 export type FolderPick = {
   label: string; placeholder: string; verb: string
@@ -31,6 +32,6 @@ export function chooseFolder(label: string, onPick: (folder: string) => void) {
 
 export const FolderPicker = memo(function FolderPicker() {
   const p = subs.use(() => picking)
-  return p ? <Suspense><Picker key={`${p.label}\n${p.not ?? ""}`} p={p} onClose={() => pickFolder(null)} /></Suspense> : null
+  return p ? <Suspense fallback={<Arriving />}><Picker key={`${p.label}\n${p.not ?? ""}`} p={p} onClose={() => pickFolder(null)} /></Suspense> : null
 })
 

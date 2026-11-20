@@ -4,6 +4,7 @@ import { get, send } from "@/core/http"
 import { hydratePrefs } from "@/core/prefs"
 import { notifyError } from "@/core/notify"
 import { span } from "@/core/spans"
+import { pluginsStarting } from "@/core/firstscreen"
 import { trackSoon } from "@/core/unsaved"
 import { askAgain, failedOf, liveShown, mockedLive, useAskAgain, type Failed, type Live } from "@/core/liveread"
 import { setHere } from "@/core/here"
@@ -28,6 +29,8 @@ import { keptEntries } from "@/core/keptEntries"
  *  core's own keys. */
 export type State = PluginState & {
   vault: { path: string; problems: { file: string; problem: string }[]
+    name?: string
+    nickname?: string
     /** Files the server is still reading (iCloud downloading them): not in the store until they arrive. */
     downloading?: string[]
     /** A sandbox (core/sandbox.ts): made up, made afresh each time it opens. */
@@ -287,7 +290,8 @@ const publish = (next: Partial<Loaded>) => {
 }
 /** The store as it is now (for code outside React). */
 export const getStore = () => loaded.store
-export const vaultName = (s: Store | null | undefined) => (s ? (s.vault.sandbox ? "Playground" : s.vault.path.split("/").filter(Boolean).pop() ?? "Vault") : "Vault")
+export const vaultFolder = (s: Store) => s.vault.path.split(/[\\/]/).filter(Boolean).pop() ?? "Vault"
+export const vaultName = (s: Store | null | undefined) => (s ? (s.vault.sandbox ? "Playground" : s.vault.name || vaultFolder(s)) : "Vault")
 export const onStore = (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn) } }
 /** Change the store optimistically, after a write: f returns a new store, with new objects where it changed (never
  *  one changed in place: the store's objects are also the server's last state, which the next refresh patches). */
@@ -312,14 +316,18 @@ function stateOf(a: Answer): State | null {
   try { return a.patch ? applyPatch(server.state, a.patch) as State : server.state } catch (e) { console.error(e); return null }
 }
 
+async function assembled(m: Manifest | Answer): Promise<Answer> {
+  if (!("tree" in m)) return m
+  const names = [...new Set(chunksOf(m.tree))]
+  const values = new Map(await Promise.all(names.map(async (c) => [c, await get<unknown>(`state/chunk/${c}`)] as const)))
+  return { v: m.v, state: assemble(m.tree, (c) => values.get(c)) as State, live: m.live, here: m.here }
+}
+
 async function fromChunks(): Promise<Answer | null> {
   try {
     const m = await get<Manifest | Answer>("state/manifest")
-    if (!("tree" in m)) return m
     await window.__vauEarlyChunks
-    const names = [...new Set(chunksOf(m.tree))]
-    const values = new Map(await Promise.all(names.map(async (c) => [c, await get<unknown>(`state/chunk/${c}`)] as const)))
-    return { v: m.v, state: assemble(m.tree, (c) => values.get(c)) as State, live: m.live, here: m.here }
+    return await assembled(m)
   } catch (e) {
     console.warn("the state's chunks", e)
     return null
@@ -337,8 +345,9 @@ function load(): Promise<void> {
       await settled()
       const gen = editCount()
       try {
-        const answer = (server ? null : await fromChunks()) ?? await get<Answer>(`state?since=${encodeURIComponent(server?.v ?? "0")}`)
+        const answer = (server ? null : await fromChunks()) ?? await assembled(await get<Manifest | Answer>(`state?since=${encodeURIComponent(server?.v ?? "0")}`))
         loading?.mark("state")
+        pluginsStarting()
         startLive(isObj(answer.live) ? answer.live : undefined)
         setHere(answer.here === "connect" ? "connect" : "mac")
         if (editCount() !== gen) { again = true; continue }

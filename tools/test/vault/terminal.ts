@@ -219,8 +219,8 @@ export default async ($: VaultTest) => {
     const { cli: termCli } = await import("../../../plugins/core/terminal/cli.ts")
     const code = termCli.ops!["terminal.wait"].code!
     check("vau terminal wait: exits with the terminal's code, 128 + a signal, 1 when it was lost, 124 on a timeout, 1 when it ended first",
-      code({ met: "exit", exit: { code: 3, signal: 0 } }) === 3 && code({ met: "exit", exit: { code: 0, signal: 15 } }) === 143 && code({ met: null, timedOut: true }) === 124 &&
-      code({ met: "exit", exit: { code: 0, signal: 0, lost: true } }) === 1 && code({ met: null, timedOut: false, exit: { code: 0, signal: 0 } }) === 1 && code({ met: "idle" }) === 0)
+      await code({ met: "exit", exit: { code: 3, signal: 0 } }) === 3 && await code({ met: "exit", exit: { code: 0, signal: 15 } }) === 143 && await code({ met: null, timedOut: true }) === 124 &&
+      await code({ met: "exit", exit: { code: 0, signal: 0, lost: true } }) === 1 && await code({ met: null, timedOut: false, exit: { code: 0, signal: 0 } }) === 1 && await code({ met: "idle" }) === 0)
     // vau's --no-<switch> turns a switch off (vau terminal send --no-enter).
     const { entryOf } = await import("../../../core/ops.ts")
     let sentAs: Any = null
@@ -242,6 +242,28 @@ export default async ($: VaultTest) => {
       outside.join() === "http://127.0.0.1:8793,http://127.0.0.1:21002,http://127.0.0.1:21001" &&
       servers({ VAULTITE_USER_DATA: ud, VAULTITE_VAULT: VAULT }, tmp)[0] === "http://127.0.0.1:21001" &&
       servers({ VAULTITE_USER_DATA: path.join(tmp, "none") }, VAULT).join() === "http://127.0.0.1:8793", [found, outside])
+  }
+
+  {
+    const { letGoUnwatched } = await import("../../../plugins/core/terminal/unwatched.ts")
+    const { sessions } = await import("../../../plugins/core/terminal/shared.ts")
+    const { WebSocket } = await import("ws")
+    const closed: string[] = []
+    const fake = (id: string, events: boolean, clients: number): import("../../../plugins/core/terminal/shared.ts").Session => {
+      const link = { cols: 80, rows: 24, write() {}, resize() {}, onData() {}, onExit() {}, snapshot() {}, close: () => { closed.push(id) } }
+      const backend = { name: "fake", label: "Fake", ready: async () => true, list: async () => [], create: async () => {}, attach: async () => link, kill: async () => {},
+        send: async () => {}, capture: async () => ({ text: "", cols: 80, rows: 24, cursor: { x: 0, y: 0 }, alternate: false }), events: events ? () => {} : undefined }
+      const s = { id, backend, link, clients: new Set<InstanceType<typeof WebSocket>>(Array.from({ length: clients }, () => Object.create(WebSocket.prototype))), started: 0, pending: new Set(),
+        queued: "", owed: new Map(), acks: new Set(), held: false } satisfies import("../../../plugins/core/terminal/shared.ts").Session
+      sessions.set(id, s)
+      return s
+    }
+    const quiet = fake("letgo1", true, 0), watched = fake("letgo2", true, 1), noEvents = fake("letgo3", false, 0)
+    for (const s of [quiet, watched, noEvents]) letGoUnwatched(s, 5)
+    await new Promise((r) => setTimeout(r, 40))
+    check("terminal: a terminal no page shows stops sending its output here, not one a page shows nor one whose end only its link tells",
+      JSON.stringify(closed) === JSON.stringify(["letgo1"]) && !sessions.has("letgo1") && sessions.has("letgo2") && sessions.has("letgo3"), closed)
+    for (const s of [watched, noEvents]) { clearTimeout(s.unwatched); sessions.delete(s.id) }
   }
 
   // Terminal ids: an agent in one of its accounts, and another machine's.
@@ -469,6 +491,48 @@ export default async ($: VaultTest) => {
       up && /didn't start \(see .*test-dead-.*\.log\)/.test(why) && ms < 2500, [up, why, ms])
   }
 
+  const nodePtySpawnsThroughItsHelper = process.platform === "darwin"
+  if (nodePtySpawnsThroughItsHelper) {
+    const { termdBackend } = await import("../../../plugins/core/terminal/backend.ts")
+    const { spawn } = await import("node:child_process")
+    const { waitFor } = await import("../lib.ts")
+    const repo = path.resolve(import.meta.dirname, "../../.."), root = path.join(tmp, "gone-root")
+    const files = ["package.json", "core/exit.ts", "core/update/lease.ts", "plugins/core/terminal/claude-pictures/decode/cells.ts", "plugins/core/terminal/keys.ts",
+      "plugins/core/terminal/lines.ts", "plugins/core/terminal/osc7501.ts", "plugins/core/terminal/vt/ghostty-vt.wasm", "plugins/core/terminal/vt/load.ts", "plugins/core/terminal/vt/vt.ts",
+      ...fs.readdirSync(path.join(repo, "plugins/core/terminal/termd")).map((f) => `plugins/core/terminal/termd/${f}`)]
+    for (const f of files) fs.cpSync(path.join(repo, f), path.join(root, f), { recursive: true })
+    const realModules = fs.realpathSync(path.join(repo, "node_modules"))
+    fs.mkdirSync(path.join(root, "node_modules"))
+    for (const m of fs.readdirSync(realModules)) if (m !== "node-pty") fs.symlinkSync(path.join(realModules, m), path.join(root, "node_modules", m))
+    for (const f of ["package.json", "lib", `prebuilds/${process.platform}-${process.arch}`]) fs.cpSync(path.join(realModules, "node-pty", f), path.join(root, "node_modules/node-pty", f), { recursive: true })
+    const b = termdBackend(`th-${process.pid}`, { daemon: path.join(repo, "plugins/core/terminal/termd/termd.ts") })
+    const old = spawn(process.execPath, [path.join(root, "plugins/core/terminal/termd/termd.ts"), b.socket, b.files], { stdio: "ignore", detached: true })
+    const pidNow = () => { try { return Number(fs.readFileSync(`${b.files}.pid`, "utf8")) } catch { return 0 } }
+    const spec = { shell: "/bin/sh", run: null, cwd: tmp, env: { PATH: "/usr/bin:/bin", HOME: tmp }, ctx: {}, cols: 80, rows: 24, scrollback: 100 }
+    const said = async (id: string, text: string) => waitFor(async () => (await b.capture(id, { format: "text" })).text.includes(text) || null, 10_000, 50)
+    try {
+      await waitFor(() => pidNow() === old.pid || null, 10_000, 50)
+      await b.create("kept1", spec)
+      await b.send("kept1", { text: "echo before-$((6*7))\r" })
+      const before = await said("kept1", "before-42")
+      fs.rmSync(root, { recursive: true, force: true })
+      await b.create("new1", spec)
+      const listed = await b.list()
+      await b.send("kept1", { text: "echo after-$((6*7))\r" })
+      const after = await said("kept1", "after-42"), next = pidNow()
+      const aside = `${b.socket}.old-${old.pid}`, asideThen = fs.existsSync(aside)
+      check("terminal server: one whose files went hands its terminals to the next, which starts the new one: none in the app's server",
+        before && after && next && next !== old.pid && asideThen && listed.find((x) => x.id === "kept1")?.via === old.pid &&
+        listed.some((x) => x.id === "new1" && !x.via), [before, after, next, old.pid, asideThen, listed])
+      await b.kill("kept1")
+      const ended = await waitFor(() => (old.exitCode !== null || old.signalCode !== null) || null, 30_000, 100)
+      check("terminal server: …and ends with its last terminal, leaving the next one's files be", ended && !fs.existsSync(aside) && pidNow() === next && fs.existsSync(b.socket) &&
+        (await b.list()).some((x) => x.id === "new1"), [ended, fs.existsSync(aside), pidNow(), next, fs.existsSync(b.socket)])
+    } finally {
+      for (const p of [pidNow(), old.pid]) if (p) try { process.kill(p, "SIGTERM") } catch { continue }
+    }
+  }
+
   // The terminal server's core (host.ts) in this process: what it keeps of each terminal (meta, command, cwd), captures as
   // text, vt and html, keys by name, its events, and an ended one kept with how it ended.
   if (process.platform !== "win32") {
@@ -577,7 +641,7 @@ export default async ($: VaultTest) => {
     const root = path.resolve(import.meta.dirname, "../../..")
     const loads = [...graphOf(diskTree(root)).reach("termd").files.keys()].filter((f) => !f.startsWith("node_modules/") && !/^package(-lock)?\.json$/.test(f)).sort()
     const own = ["core/exit.ts", "core/update/lease.ts", "plugins/core/terminal/claude-pictures/decode/cells.ts", "plugins/core/terminal/keys.ts", "plugins/core/terminal/lines.ts",
-      "plugins/core/terminal/osc7501.ts", ...["adopt", "capture", "host", "kitty", "png", "protocol", "screen", "screenworker", "spawnhelper", "termd"].map((f) => `plugins/core/terminal/termd/${f}.ts`),
+      "plugins/core/terminal/osc7501.ts", ...["adopt", "capture", "host", "kitty", "pictures", "pictureworker", "png", "protocol", "screen", "screenworker", "spawnhelper", "termd", "unfinished"].map((f) => `plugins/core/terminal/termd/${f}.ts`),
       "plugins/core/terminal/vt/ghostty-vt.wasm", "plugins/core/terminal/vt/load.ts", "plugins/core/terminal/vt/vt.ts"]
     check("terminal server: loads only its own files (one more is code a running one never updates: keep it compatible, then list it here)",
       JSON.stringify(loads) === JSON.stringify(own), loads.filter((f) => !own.includes(f)))

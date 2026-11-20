@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { headless } from "../../../core/headless.ts"
+import { headless, open } from "../../../core/headless.ts"
 
 const EVALUATED = z.object({ result: z.object({ value: z.unknown() }).partial().optional(), exceptionDetails: z.object({ text: z.string().optional() }).optional() })
 const RECT = z.object({ x: z.number(), y: z.number(), w: z.number(), h: z.number() })
@@ -16,18 +16,15 @@ export async function pictures(o: { url: string; width: number; height: number; 
     await p.send("Page.enable"); await p.send("Runtime.enable")
     await p.send("Emulation.setDeviceMetricsOverride", { width: o.width, height: o.height, deviceScaleFactor: scale, mobile: false })
     await p.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: o.dark ? "dark" : "light" }, { name: "prefers-reduced-motion", value: "reduce" }] })
-    const loaded = new Promise<void>((ok) => p.on("Page.loadEventFired", () => ok()))
-    const nav = await p.send("Page.navigate", { url: o.url })
-    if (nav.errorText) throw new Error(`couldn't open ${o.url}: ${nav.errorText}`)
-    await Promise.race([loaded, sleep(15_000)])
+    await open(p, o.url)
     const js = async (expr: string) => {
       const r = EVALUATED.parse(await p.send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }))
       if (r.exceptionDetails) throw new Error(`the page: ${r.exceptionDetails.text}`)
       return r.result?.value
     }
     const drawn = o.selector
-      ? `document.URL !== "about:blank" && [...document.querySelectorAll(${JSON.stringify(o.selector)})].some((e) => e.getBoundingClientRect().width > 0)`
-      : `document.URL !== "about:blank" && !!document.body && document.body.innerText.trim().length > 0`
+      ? `[...document.querySelectorAll(${JSON.stringify(o.selector)})].some((e) => e.getBoundingClientRect().width > 0)`
+      : `!!document.body && document.body.innerText.trim().length > 0`
     for (let i = 0; i < 120 && !(await js(drawn)); i++) await sleep(250)
     await js("document.fonts ? document.fonts.ready.then(() => true) : true")
     await sleep(800)

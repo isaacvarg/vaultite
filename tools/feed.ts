@@ -1,5 +1,5 @@
 // `node tools/feed.ts <folder>`: each pair of update lists release.yml's one-architecture builds wrote (<name>.<arch>.yml:
-// the Mac's zips, Windows' installers) merged into the <name>.yml a build of both would write; an app picks its file by name.
+// Windows' installers) merged into the <name>.yml a build of both would write; an app picks its file by name.
 import fs from "node:fs"
 import path from "node:path"
 

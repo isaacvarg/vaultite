@@ -9,6 +9,7 @@ import { onOff, pluginList } from "./plugins.ts"
 import { serverUrl } from "../plugins.ts"
 import { untyped } from "./types.ts"
 import { logger } from "../log.ts"
+import { ownNickname, vaultName } from "../vaultname.ts"
 
 const log = logger("context")
 
@@ -40,7 +41,7 @@ the window shows (and the hidden ones), which plugins are on or off, the appeara
       const { on } = onOff(plugins, app.vault.config("plugins"))
       const fromPlugins: object = Object.assign({}, ...extra.map((x) => x.data ?? {}))
       return {
-        url: serverUrl(), server: "running", windows, vault: app.vault.path, client: client ?? null,
+        url: serverUrl(), server: "running", windows, vault: app.vault.path, name: vaultName(app.vault.path, ownNickname(app.vault)), client: client ?? null,
         ...fromPlugins,
         extra: extra.map((x) => x.text ?? "").filter(Boolean),
         sidebars: target ? { workspace: target.label, own: !!target.setup } : null,
@@ -53,19 +54,19 @@ the window shows (and the hidden ones), which plugins are on or off, the appeara
       const off = r.plugins.filter((p) => !p.on)
       return [
         `Server: ${r.url} (running, ${r.windows} app window${r.windows === 1 ? "" : "s"} open)`,
-        `Vault: ${r.vault}`,
+        `Vault: ${r.name} (${r.vault})`,
         `Client: ${r.client ?? "unknown (VAULTITE_CLIENT isn't set: not in the app's terminal)"}`,
         "",
         ...r.extra.flatMap((t) => [t, ""]),
         ...(r.sidebars ? [`Panels (${r.sidebars.workspace}'s${r.sidebars.own ? "" : ": the default"}):`] : []),
-        showPanels(r.panels),
+        showPanels(r.panels).replace(/^Hidden: (?!none$).*$/m, `Hidden: ${r.panels.filter((p) => !p.side).length} more (vau panels names them)`),
         "",
         `Plugins: ${r.plugins.length - off.length} on; off: ${off.map((p) => p.id + (p.tier === "vault" ? " (vault)" : "")).join(", ") || "none"}`,
         `Appearance: ${Object.entries(r.appearance).map(([k, x]) => `${k}=${JSON.stringify(x)}`).join(" ") || "defaults"}`,
         `Hotkeys changed: ${Object.entries(r.hotkeys).map(([k, x]) => `${k}=${strings(x).join("/") || "none"}`).join(" ") || "none"}`,
         ...(r.untyped.length ? [`Without a type (plain notes until they have one; vau type): ${r.untyped.map((g) => `${g.folder}/ ${g.files} (${g.type}?)`).join(", ")}`] : []),
         "",
-        "Next: vau today, vau render <file>, vau open <file>, vau docs, vau --help",
+        "Next: vau tabs (what the user has open), vau render <file>, vau open <file>, vau docs, vau --help",
       ].join("\n")
     },
   })]

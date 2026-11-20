@@ -2,12 +2,13 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
-import { z } from "zod"
 import { catalogOf, type OpEntry } from "./contracts/ops.ts"
 import { camel, flagOf, kebab, opDoc, restarting, usage as opUsage } from "./ops.ts"
-import { distance } from "./blocks.ts"
+import { brief } from "./words.ts"
+import { distance } from "./spelling.ts"
 import { EVENT_TYPES } from "./events.ts"
 import { gitEnv } from "./gitenv.ts"
+import { request } from "./clihttp.ts"
 import { servingOf } from "./serving.ts"
 import { TEST_HEADER, inTestRun, testRunId } from "./testrun.ts"
 import { isObj } from "./values.ts"
@@ -16,6 +17,7 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const DEFAULT_URL = "http://127.0.0.1:8793"
 const RESTART_RETRY_MS = 60_000
 const COMING_BACK_MS = 30_000
+const UPLOAD_MOST = 50e6
 
 export type Obj = Record<string, unknown>
 export type Args = { _: string[]; flags: Record<string, string | true>
@@ -61,23 +63,6 @@ function parseJson(s: string): unknown {
   } catch (e) {
     throw new CliError(`that isn't JSON (${e instanceof Error ? e.message : String(e)})`)
   }
-}
-
-/** One HTTP request, with Node's http module: fetch would load undici, a third of a short command's start. */
-async function request(url: string, method: string, body?: string, extra: Record<string, string> = {}) {
-  const u = new URL(url)
-  const { request: send } = u.protocol === "https:" ? await import("node:https") : await import("node:http")
-  return new Promise<{ status: number; type: string; text: string }>((resolve, reject) => {
-    const headers = body === undefined ? extra : { ...extra, "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(body)) }
-    const req = send(u, { method, headers }, (res) => {
-      const chunks: Buffer[] = []
-      res.on("data", (c: Buffer) => chunks.push(c))
-      res.on("error", reject)
-      res.on("end", () => resolve({ status: res.statusCode ?? 0, type: String(res.headers["content-type"] ?? ""), text: Buffer.concat(chunks).toString("utf8") }))
-    })
-    req.on("error", reject)
-    req.end(body)
-  })
 }
 
 export const userData = (env: Record<string, string | undefined> = process.env, platform: string = process.platform) => env.VAULTITE_USER_DATA || (
@@ -406,7 +391,7 @@ vau events | while read -r ev; do echo "$ev" | jq -r .type; done`,
     const kept: unknown[] = []
     for (;;) {
       const left = Math.max(0, Math.min(60, (end - Date.now()) / 1000))
-      const r = Waited.parse(await c.call("POST", "ops/events.wait", { types: flag(a, "type") ?? flag(a, "types"), path: flag(a, "path"), after, timeout: left }))
+      const r = (await answers()).Waited.parse(await c.call("POST", "ops/events.wait", { types: flag(a, "type") ?? flag(a, "types"), path: flag(a, "path"), after, timeout: left }))
       after = r.cursor ?? after
       if (r.missed) process.stderr.write("vau events: some events were let go of before they could be printed\n")
       for (const ev of r.events ?? []) {
@@ -425,10 +410,9 @@ vau events | while read -r ev; do echo "$ev" | jq -r .type; done`,
 const local = (p: string) => path.resolve(String(p).replace(/^~(?=[\\/]|$)/, os.homedir()))
 
 // oxlint-disable-next-line anti-slop/no-unknown-parameters -- out and code read the server's answer, each parsing what it reads
-export type Local = { params?: (p: Obj, c: Ctx) => Promise<Obj>; extra?: number; out?: (result: unknown, p: Obj, extra: string[]) => string; code?: (result: unknown) => number
+export type Local = { params?: (p: Obj, c: Ctx, extra: string[]) => Promise<Obj>; extra?: number; out?: (result: unknown, p: Obj, extra: string[]) => string; code?: (result: unknown) => number | Promise<number>
   again?: (p: Obj, ms: number) => Obj | null
   gone?: (p: Obj, why: string, ms: number) => { result: unknown; text: string } | null }
-const Live = z.looseObject({ live: z.looseObject({ live: z.unknown().optional() }) })
 const LOCAL: Record<string, Local> = {
   "app.version": {
     params: async (p) => {
@@ -438,7 +422,7 @@ const LOCAL: Record<string, Local> = {
       try { return { ...p, commit: execFileSync("git", ["rev-parse", "--verify", "--quiet", `${given}^{commit}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], env: gitEnv() }).trim() || given } }
       catch { return p }
     },
-    code: (r) => { const l = Live.safeParse(r); return l.success && !l.data.live.live ? 1 : 0 },
+    code: async (r) => { const l = (await answers()).Live.safeParse(r); return l.success && !l.data.live.live ? 1 : 0 },
     again: (p, ms) => {
       const left = Math.round(Number(p.timeout ?? 900) - ms / 1000)
       return p.wait && left > 5 ? { ...p, timeout: left, waited: Number(p.waited ?? 0) + Math.round(ms / 1000) } : null
@@ -448,6 +432,19 @@ const LOCAL: Record<string, Local> = {
       const live = { commit: p.commit, live: false, final: false, outcome: "unreachable", waited: Number(p.waited ?? 0) + Math.round(ms / 1000),
         why: `${p.commit.slice(0, 7)}: can't tell if it's live: ${why}, till the wait's ${p.timeout ?? 900} s were up` }
       return { result: { live }, text: live.why }
+    },
+  },
+  "file.upload": {
+    extra: 1,
+    params: async (p, _c, extra) => {
+      const given = extra[0] ?? (p.file === undefined || isObj(p.file) || /^\s*\{/.test(String(p.file)) ? undefined : String(p.file))
+      if (given === undefined) return p
+      const from = local(given)
+      const size = fs.statSync(from, { throwIfNoEntry: false })?.size
+      if (size === undefined) throw new CliError(`no file ${from} on this machine`)
+      if (size > UPLOAD_MOST) throw new CliError(`${from} is over ${UPLOAD_MOST / 1e6} MB: send its bytes as the body of POST /api/ops/file.upload (vau upload --help)`)
+      const { file: _, ...rest } = p
+      return { ...rest, data: fs.readFileSync(from).toString("base64"), name: p.name ?? path.basename(from) }
     },
   },
   "file.write": {
@@ -545,39 +542,43 @@ function leadingWords(argv: string[]) {
   return out
 }
 
-function usage(cmds: Command[], ops: OpEntry[] | null = null) {
+function overview(cmds: Command[], ops: OpEntry[]) {
   const rows: [string, string][] = []
-  for (const e of ops ?? []) {
+  for (const e of ops) {
     if (!e.cli) continue
     const first = e.cli.split(" ")[0]
     if (rows.some(([n]) => n === first)) continue
-    const group = (ops ?? []).filter((x) => x.cli?.split(" ")[0] === first)
-    rows.push([first, group.length === 1 && group[0].cli === first ? e.summary : group.find((x) => x.cli === first)?.summary ??
-      `${group.map((x) => x.cli!.split(" ").slice(1).join(" ") || first).join(", ")}: vau ${first} --help`])
+    const group = ops.filter((x) => x.cli?.split(" ")[0] === first)
+    const subs = group.map((x) => x.cli!.split(" ").slice(1).join(" ") || first)
+    const own = group.length === 1 && group[0].cli === first ? e.summary : group.find((x) => x.cli === first)?.summary
+    rows.push([first, own ? brief(own) : `${subs.slice(0, 8).join(", ")}${subs.length > 8 ? `, … (+${subs.length - 8})` : ""}`])
   }
-  for (const c of cmds) if (!rows.some(([n]) => n === c.name)) rows.push([c.name, c.summary])
+  for (const c of cmds) if (!rows.some(([n]) => n === c.name)) rows.push([c.name, brief(c.summary)])
+  return rows
+}
+
+function usage(cmds: Command[], ops: OpEntry[] | null = null) {
+  const rows = overview(cmds, ops ?? [])
   const w = Math.max(...rows.map(([n]) => n.length))
+  const windows = process.platform === "win32" || !!process.env.WSL_DISTRO_NAME
   return `vau: drive Vaultite (the user's vault and app) from a terminal.
 
 Commands:
 ${rows.map(([n, s]) => `  ${n.padEnd(w)}  ${s}`).join("\n")}
 
-${ops ? `And every operation of the API by its id (${ops.length} here): \`vau ops\` lists them, \`vau <id> --help\` explains one.`
+${ops ? `And every operation of the API by its id (${ops.length} here): \`vau ops\` lists them.`
     : "The rest (context, render, read, search, panels, plugins...) are the server's operations: they're listed once it answers."}
 Start with \`vau context\`. \`vau <command> --help\` explains one, with examples.
 When you finish something the user should know about, \`vau notify <text>\` tells them (a toast, kept in their inbox).
 
-Options: --json (machine-readable output), --count (how many a list answer holds), --paths (its files, one a line),
---copy (the output on the clipboard too), --url <server>. \`-\` as a value reads stdin. \`vau\` alone in a terminal
-is a prompt (Tab completes, with history).
-Exit status: 0 done, 1 it failed, 2 the command line was wrong (an unknown command, a missing or bad argument).
-Environment: VAULTITE_URL (else the server for the vault you're in, then ${DEFAULT_URL}, then the
-app's other open vaults: the first that answers), VAULTITE_CLIENT (desktop, iphone or web: set by the app's terminal),
-VAULTITE_HOME (a job's terminal on another machine: what reaches the user, a knock or an inbox ask, goes to that server).
+Options: --json, --count (how many a list holds), --paths (its files, one a line), --copy (to the clipboard too),
+--url <server>. \`-\` as a value reads stdin. \`vau\` alone in a terminal is a prompt.
+Exit status: 0 done, 1 it failed, 2 the command line was wrong.
+Environment: VAULTITE_URL (else the server for the vault you're in, then ${DEFAULT_URL}, then the app's
+other open vaults), VAULTITE_HOME (a job's terminal on another machine: what reaches the user goes to that server).${windows ? `
 Windows: vau runs in PowerShell, cmd and Git Bash (there cmd expands %VAR% in arguments: such text goes by --from or
-stdin). In WSL (\`vau wsl install\` from Windows) it's Windows' vau: paths it prints are WSL's.
-Settings and data both go through the server (settings key by key, the rest of each file kept); the app follows
-every change live. File formats: vau docs.`
+stdin). In WSL (\`vau wsl install\` from Windows) it's Windows' vau: paths it prints are WSL's.` : ""}
+File formats: vau docs.`
 }
 
 const commandHelp = (c: Command) => `${c.usage}\n\n${c.summary}\n\n${c.help}`
@@ -638,13 +639,7 @@ function listOf(r: unknown): unknown[] | null {
   return null
 }
 
-const OptionalText = z.string().optional().catch(undefined)
-const Waited = z.looseObject({ cursor: z.string().optional(), missed: z.boolean().optional(), events: z.array(z.unknown()).optional() })
-const Named = z.object({ path: OptionalText, file: OptionalText, id: OptionalText }).catch({})
-const Rows = z.array(z.looseObject({ path: z.unknown() })).optional().catch([]).transform((x) => x ?? [])
-const Tree = z.object({ files: Rows, others: Rows }).catch({ files: [], others: [] })
-const Failure = z.object({ problems: z.array(z.string()).optional().catch(undefined) }).catch({})
-const Both = z.object({ result: z.unknown(), text: z.unknown() }).partial().catch({})
+const answers = () => import("./clianswers.ts")
 
 async function listed(r: unknown, how: Shape, c: Ctx): Promise<string> {
   const rows = listOf(r)
@@ -653,10 +648,10 @@ async function listed(r: unknown, how: Shape, c: Ctx): Promise<string> {
   let tree: Set<unknown> | null = null
   const out: string[] = []
   for (const x of rows) {
-    const o = Named.parse(x)
+    const o = (await answers()).Named.parse(x)
     let p = typeof x === "string" ? x : o.path ?? o.file ?? null
     if (p === null && o.id !== undefined) {
-      if (!tree) { const t = Tree.parse(await c.call("GET", "files").catch(() => ({}))); tree = new Set([...t.files, ...t.others].map((f) => f.path)) }
+      if (!tree) { const t = (await answers()).Tree.parse(await c.call("GET", "files").catch(() => ({}))); tree = new Set([...t.files, ...t.others].map((f) => f.path)) }
       p = tree.has(`${o.id}.md`) ? `${o.id}.md` : tree.has(o.id) ? o.id : null
     }
     if (p === null) throw new CliError("--paths: this command's answer lists things that aren't files (see it with --json)")
@@ -678,7 +673,7 @@ export function cliError(e: OpEntry, msg: string, problems: string[]): { msg: st
 async function runOp(e: OpEntry, argv: string[], c: Ctx, how: Shape): Promise<{ out: string; code: number }> {
   const loc = LOCAL[e.id] ?? (await loadPlugins(), pluginLocal.get(e.id)) ?? {}
   const given = await opParams(e, argv, c, loc.extra ?? 0)
-  const params = loc.params ? await loc.params(given.params, c) : given.params
+  const params = loc.params ? await loc.params(given.params, c, given.extra) : given.params
   const list = !!how.count || !!how.paths
   const json = !!how.json || list
   const out = !!loc.out && !json
@@ -695,18 +690,18 @@ async function runOp(e: OpEntry, argv: string[], c: Ctx, how: Shape): Promise<{ 
     if (next) { p = next; await new Promise((ok) => setTimeout(ok, 3000)); continue }
     const why = `the server at ${c.url} ${r ? `answered ${r.status}, not itself (a proxy: the server behind it is down)` : "didn't answer"} for ${Math.round((Date.now() - down) / 1000)} s`
     const gone = loc.gone?.(params, why, Date.now() - began)
-    if (gone) return { out: json ? JSON.stringify(gone.result, null, 2) : gone.text, code: loc.code?.(gone.result) ?? 1 }
+    if (gone) return { out: json ? JSON.stringify(gone.result, null, 2) : gone.text, code: await loc.code?.(gone.result) ?? 1 }
     throw failed ?? new CliError(why)
   }
   if (r.status >= 400) {
-    const b = r.body, { problems } = Failure.parse(b)
+    const b = r.body, { problems } = (await answers()).Failure.parse(b)
     const reason = String(isObj(b) && "error" in b ? b.error : b).replace(`${e.id}: `, "") || `the server answered ${r.status}, with no reason`
     const said = cliError(e, reason, problems ?? [])
     throw new CliError([said.msg, ...said.problems.map((x) => `  - ${x}`)].join("\n"), r.status === 400 && !!problems)
   }
-  const shown = both ? Both.parse(r.body) : null
+  const shown = both ? (await answers()).Both.parse(r.body) : null
   const result = shown ? shown.result : r.body, text = shown ? shown.text : r.body
-  const code = loc.code?.(result) ?? 0
+  const code = await loc.code?.(result) ?? 0
   if (out) return { out: loc.out!(result, params, given.extra), code }
   if (list) return { out: await listed(result, how, c), code }
   if (json) return { out: JSON.stringify(result, null, 2), code }
@@ -718,6 +713,21 @@ function nearby(word: string, names: string[]): string[] {
   const scored = [...new Set(names)].map((n) => ({ n, d: distance(w, n.toLowerCase()) }))
     .filter((x) => x.d <= most || x.n.toLowerCase().startsWith(w.slice(0, Math.max(3, w.length - 1))))
   return scored.sort((x, y) => x.d - y.d).slice(0, 4).map((x) => x.n)
+}
+
+const listWord = (op: OpEntry, which: string, next = "") => (op.id.endsWith(".list") && !op.args.length && op.cli === which && ["list", "ls"].includes(next) ? [next] : [])
+
+function opHelp(op: OpEntry, ops: OpEntry[]) {
+  const under = op.cli && !op.cli.includes(" ") ? ops.filter((x) => x.cli?.startsWith(`${op.cli} `)) : []
+  const subs = under.length ? `\n\nAlso:\n${under.map((x) => `  vau ${x.cli!.padEnd(24)} ${brief(x.summary, 60)}`).join("\n")}` : ""
+  return opDoc(op, "#").replace(/^# .*/, `vau ${op.cli ? `${op.cli} (${op.id})` : op.id}`) + subs
+}
+
+function meantUnder(op: OpEntry, ops: OpEntry[], extra: string) {
+  const subs = extra ? ops.filter((x) => x.cli?.startsWith(`${op.cli ?? op.id} `)) : []
+  const near = nearby(extra, subs.map((x) => (x.cli ?? "").split(" ")[1] ?? "")), under = subs.filter((x) => x.args.length)
+  return near.length ? ` Did you mean ${near.slice(0, 3).map((n) => `vau ${op.cli} ${n}`).join(" or ")}?`
+    : under.length ? ` Did you mean ${under.slice(0, 3).map((x) => `vau ${x.cli} ${extra}`).join(" or ")}?` : ""
 }
 
 export async function execute(argv: string[], opts: CtxOptions = {}): Promise<{ code: number; out: string; err: string; exact?: boolean }> {
@@ -759,26 +769,25 @@ export async function execute(argv: string[], opts: CtxOptions = {}): Promise<{ 
     const more = named.length > 1 && !help && !a.flags.help
     if (group.length) {
       const close = more ? nearby(named[1], group.flatMap((e) => (e.cli?.startsWith(`${which} `) ? [said(e)[1]] : []))) : []
-      return { code: more ? 2 : 0, out: group.map((e) => `  vau ${(e.cli ?? e.id).padEnd(24)} ${e.summary}`).join("\n") + `\n\n\`vau ${which} <command> --help\` explains one.`,
+      return { code: more ? 2 : 0, out: group.map((e) => `  vau ${(e.cli ?? e.id).padEnd(24)} ${brief(e.summary)}`).join("\n") + `\n\n\`vau ${which} <command> --help\` explains one.`,
         err: more ? `vau: no command '${named.slice(0, 2).join(" ")}'${close.length ? `. Did you mean ${close.map((n) => `vau ${which} ${n}`).join(" or ")}?` : ""}` : "" }
     }
     const every = ops && (await catalog(c))
     const near = nearby(which, [...all.map((x) => x.name), ...(every ?? []).flatMap((e) => [e.id, said(e)[0] ?? ""]).filter(Boolean)])
     return { code: 2, out: "", err: `vau: no command '${which}'.${near.length ? ` Did you mean ${near.join(" or ")}?` : ""} See vau --help${ops ? " (a plugin's commands are there while it's on: vau plugins)" : ` (and ${c.down()})`}.` }
   }
-  if (help || a.flags.help) return { code: 0, out: opDoc(op, "#").replace(/^# .*/, `vau ${op.cli ? `${op.cli} (${op.id})` : op.id}`), err: "" }
+  if (help || a.flags.help) return { code: 0, out: opHelp(op, ops ?? []), err: "" }
   const home = flag(a, "url") ?? opts.url ? null : homeEnv(c.env, op)
   if (home) c = new Ctx({ ...opts, api: undefined, env: home })
   c.command = op.cli ?? op.id
   const rest = [...argv]
-  for (const w of [...(help ? ["help"] : []), ...(op.id === which ? [which] : said(op))]) rest.splice(rest.indexOf(w), 1)
+  for (const w of [...(help ? ["help"] : []), ...(op.id === which ? [which] : said(op)), ...listWord(op, which, named[1])]) rest.splice(rest.indexOf(w), 1)
   try {
     const { out, code } = await runOp(op, rest, c, { json: !!a.flags.json, count: !!a.flags.count, paths: !!a.flags.paths })
     return { code, out, err: "", ...(op.exact && !a.flags.json ? { exact: true } : {}) }
   } catch (e) {
     if (!(e instanceof CliError)) throw e
-    const under = e.message.startsWith("too many arguments") ? (ops ?? []).filter((x) => x.cli?.startsWith(`${op.cli ?? op.id} `) && x.args.length) : []
-    const hint = under.length ? ` Did you mean ${under.slice(0, 3).map((x) => `vau ${x.cli} ${rest.find((w) => !w.startsWith("-")) ?? ""}`.trim()).join(" or ")}?` : ""
+    const hint = e.message.startsWith("too many arguments") ? meantUnder(op, ops ?? [], rest.find((w) => !w.startsWith("-")) ?? "") : ""
     return { code: e.usage ? 2 : 1, out: "", err: `vau ${op.cli ?? op.id}: ${e.message}${hint}` }
   }
 }

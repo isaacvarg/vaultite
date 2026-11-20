@@ -4,10 +4,123 @@ What changed in Vaultite, newest first: one line per change, as it stands now (a
 release is written once, as it ended up). Versions follow [semantic versioning](https://semver.org); the plugin API has
 its own number (`API_VERSION` in `core/version.ts`). The details are in git history and in `vau docs`.
 
-## Unreleased
+## 0.15.0 (2026-11-19)
 
+Faster and steadier everywhere, with big vaults above all: windows open on your last screen at once, search answers as
+you type and ignores accents as in Obsidian, and the server stays responsive on iCloud. Workspaces get a page of their
+own, up to nine, synced across machines; version history replaces Review; the companion is one talk across vaults; the
+browser's logins live in containers; phones and terminals are much smoother. Also everything from the unpublished
+0.14.0: Research with References, Zotero and citations, simpler Settings, jobs in the cloud, Vaultite Cloud, block
+references and several cursors as in Obsidian, and Electron 45.
+
+### Changes
+
+- People: how long since a friend who is due, and a birthday's month, read at 4.5:1 contrast in every scheme.
+- Companion: its page's More menu no longer offers Show its chat beside the page's own Chat button.
+- Folders: switching a folder page to columns (⌥⌘3) keeps the keyboard on the thing you were on, instead of losing it
+  now and then while the columns loaded.
+- Desktop app: the first launch after an update or on a new account opens its window about 0.2 s sooner and starts its
+  server about half a second sooner: the code comes with its compiled cache, and the app's own cache no longer grows by
+  about 11 MB with every update.
+- A big vault no longer stalls the app every 10 s: the app's requests stop waiting for the server's periodic check of
+  every file (130 to 300 ms at 15,000 notes), and checking which Claude Code sessions run no longer blocks the server.
+- If the app didn't finish starting last time (a vault plugin froze it), it starts with vault plugins off and says so,
+  with Turn back on, instead of freezing the same way again.
+- Desktop app: a vault's server holds about 50 MB less memory once it has read a big vault (15,000 notes: 285 to 234
+  MB): it no longer keeps the room it used while reading.
+- The note a window opens on draws sooner: its text is read from the vault once at launch, not a second time, and code
+  the app loads while idle (palettes, the agents' chat and terminal) waits until the first screen has drawn.
+- Desktop app: a vault's window opens showing its last screen at once, as you left it, and fades to the live app as soon
+  as that has drawn its file tree and open note, instead of a blank window until the vault has loaded.
+- Search: the search tab shows its first results as you type, with no pause: drawn about 15 ms after a key on a vault of
+  15,000 notes, where it took 300 to 800, as the first files found are shown before the rest are counted, and the names
+  are read ahead while the app is idle. Keys typed in a burst ask once, when it pauses; the switcher searches files
+  0.1 s after the last key, as it shows names at once.
+- Search: a word found in most notes answers about 5 times sooner (the search tab, the switcher, query blocks, vau search):
+  only the shown files' lines are read out, and a page further down reuses the search.
+- Search: accents don't matter, as in Obsidian: "cafe" finds "café" and "café" finds "cafe"; ø, ł and ß match o, l and ss.
+  The quick switcher and the search tab's names ignore accents too.
+- Claude Code: telling which terminals wait for you re-reads only the session files that changed, not all of them each
+  time one does, which on a machine with hundreds of them held the server for about 10 ms several times a second.
+- File history: catching up on a big vault's files, about 10 s after the server starts, no longer holds every other
+  request for up to a second; it lets them through every few milliseconds.
+- Opening a big vault: its files show sooner, the first time and every time after (15,000 notes, the server's start to
+  its first answer: the first time 4.5 s to 1.3 s, after that 1.4 s to 1.0 s; its notes are read on other threads).
+- Settings: a change in a big vault no longer has the app's next request wait while every note's file is looked at
+  again (15,000 notes: about 200 ms each).
+- Desktop: a vault opens sooner at launch: its server starts before the rest of the app loads, its window before the
+  Browser, updates and menus, and the app keeps the code it compiled even when it was stopped or crashed.
+- Pictures of a page (vau html picture): on Windows they use the installed Chrome or Edge, so they work on Windows on Arm,
+  and a page that fails to open says so instead of "nothing on the page matches".
+- Companion and agents: they attach a file from the vault to a web page (a screenshot to a Reddit reply), through
+  the page's own picker button too, where the site hides its file input.
+- Companion: filling in posts, messages or forms for you to review and send happens in your browser in front of you,
+  never as a background job; and a question you ask it always gets words, even when it also acts.
+- Terminal: a full-screen program's terminal (vim, htop, less) no longer opens blank now and then: its picture failed
+  whenever its output had stopped in the middle of an escape sequence. Open terminals move to a terminal server with the fix.
+- Terminal: after an update, open terminals move to the new terminal server up to 4 times sooner (four at a time, not one
+  by one), so they're frozen for less of it.
+- Terminal: a big picture (a PNG shown with kitty's protocol) no longer freezes every other terminal while it's decoded:
+  it's decoded on a thread of its own, and only its own terminal's output waits for it.
+- Terminal: terminals you aren't looking at cost the terminal server about half the CPU they did while their programs
+  draw (a spinner, an agent at work): their screens take output in batches, and still answer a program's questions at once.
+- Terminal: an agent's terminal no page shows (started in the background, or its tab closed) no longer costs the server:
+  its output stops coming there 30 s after the last page leaves, and a page opening it again gets its screen as before.
+- Server: starts answering sooner after an update that changed no part of the web app (2.4 s, now 0.9 s on a 3,000-note
+  vault).
+- Server: an agent's request no longer checks every file of every vault plugin on the main thread (38 file reads each
+  with 3 small plugins, now 8, however many plugins).
+- Server: iCloud is asked for the files it evicted a few at a time, and a file that stays away less and less often (in
+  an hour: 60 asks each, now 6).
+- Server: while iCloud has files to bring down (Optimize Mac Storage), the app's requests no longer each walk the whole
+  vault (78 ms each, now 3).
+- Server: a file iCloud hasn't brought down no longer fails requests and the scheduler's runs ("Unknown system error
+  -11"): what reads it waits for it, the rest goes on.
+- Server: an upload (a voice note from the watch, a photo) no longer holds every save until its bytes arrive.
+- Server: a walk of the vault looks at the disk before it holds the vault, so a save no longer waits behind one on a slow
+  disk (2.4 s, now none).
+- Server: files gone from a folder (moved by hand) ask the disk once, not once each: 1.8 s frozen on a 3,000-note vault,
+  now 0.3 s.
+- Server: a walk of the vault no longer reads every settings file again when none changed (each read a wait on iCloud).
+- Open apps (a phone above all) no longer download all of a big vault's data again after the server restarts for an
+  update: they get only the parts that changed, which is often none (159 KB down to 2 KB on a 2,700-note vault).
+- iPhone notifications and widget updates keep one connection to Apple open and try once more on a new one when it
+  doesn't answer, instead of opening one per notification and failing with "timed out".
+- Updates: a page open from before an update still opens views and sheets it hadn't loaded yet (they failed with
+  "Failed to fetch dynamically imported module"): the server keeps an old build's files for three days.
+- vau: a call takes about a third of the time it did (about 135 ms instead of 350 ms on a busy Linux machine): it no
+  longer loads zod, yaml or Node's HTTP module to start.
+- vau: `vau --help` is a short overview, one line per command; `vau ops` lists each operation in a short line.
+- vau: `vau inbox report --help` (and every other inbox command's) shows that command's own flags, `vau terminal list`
+  works, a group's `--help` ends with the commands under it, and a misspelt one is named (`vau inbox reprot`).
+- vau: `vau upload <file>` takes a file on this machine by its path; a timeout given in milliseconds says it's in
+  seconds; `vau context` points to `vau tabs` (it named a `vau today` that doesn't exist).
+- MCP: the tool list is 13% smaller (no command-line examples, no repeated titles), so every session starts with fewer tokens.
+- Terminals: what an agent in one of the app's terminals is told about Vaultite is half as long.
+- Browser: agents are told to use Vaultite's browser, not Chrome's Claude extension, which a Claude Code with both tried
+  first (in evals, 2 of 6 sessions instead of 6 of 6; some gave up when the extension wasn't connected).
+- Browser: the address bar's suggestions come in half the time from a long history (50,000 pages: 120 to 50 ms a key,
+  each of which held up the app's main process).
+- Browser: an agent's open or act that leaves "Saving…" or "Loading…" on the page waits for it to finish (up to 3 s),
+  so the answer says "Settings saved" instead of needing another call to wait.
 - Workspaces: tabs opened as the app starts (by an agent, a link, or the demo's Browser page with its live sites) are no
   longer taken away when the workspace's own tabs come in, nor sent back behind the page the app was opened at.
+- Quick switcher: finding notes by name as you type takes about a third of the time it did (over 1,500 notes, 10 ms
+  instead of 31 ms for seven keys).
+- Errors: a part drawn on its own (a note's embed, a table or callout in the editor, a map's pin) logs what failed and
+  where, instead of React's bare "Minified React error #520".
+- Lighter start: Activity's blocks, page and panel load when first shown (39 KB less for the app to load at start),
+  and the server no longer loads the chat keeper's code.
+- A part of the app fetched in the background no longer reloads the page when the server was away for a moment (a
+  restart): only a newer build, or a file gone, does.
+- A note open when Vaultite starts shows sooner: its editor's code comes with the vault, and the note draws the moment
+  it's in (0.46 s instead of 0.74 s on a computer, 1.5 s instead of 1.6 s on a slow phone).
+- Vaultite opens without waiting for a vault plugin whose code is slow to come (a busy machine building it): after
+  1.5 s at most it draws, and that plugin's tabs and blocks fill in when its code arrives.
+- A window left open in view moves to a new build of Vaultite by itself once you leave it alone for 10 minutes with
+  nothing unsaved, so days later a view it hadn't opened yet no longer fails with "couldn't be drawn".
+- Appearance: Snappy animations now reach nearly everything that moves (hovers, toasts, menus, folds, the tab list),
+  not a quarter of it; the phone bar's menu fades out as other menus do; and a few labels read at 4.5:1 in every scheme.
 - Companion: its Do it card for acting in another app is drawn over its answer box, so the box never covers its
   buttons; and typing it did in another app is checked by what the field holds, so a box that stayed empty is said so.
 - Inbox: answering a question no longer closes other open ones as "settled" when nothing settled them (they showed
@@ -18,6 +131,8 @@ its own number (`API_VERSION` in `core/version.ts`). The details are in git hist
   "A new version of Vaultite is ready" again: a server that started up fast is no longer mistaken for one it can't talk to.
 - Companion: Talk key answers over a note come up to 2 s sooner (a spoken ask no longer waits for the note to save it,
   only a typed one does), and its close-up is taken at the screen's own resolution, not upscaled, so each ask costs fewer tokens.
+- Desktop: with Cloud sessions open, the app reads claude.ai's sessions when they're due instead of waking each second
+  to see (4 wakeups in 38 s instead of 38).
 - Desktop: the left sidebar's header and bottom bar take what you drag there: Workspaces, Inbox, the Plugins button,
   or a panel with a rail icon (File explorer, Outline, Tags...), drawn as that icon and opening the panel beside it.
   Drag them back into either sidebar, or right-click a bar for its list. The vault picker and Settings stay put.
@@ -46,6 +161,8 @@ its own number (`API_VERSION` in `core/version.ts`). The details are in git hist
   names who asked and opens that agent's terminal or session; it takes Done or "I can't" with a reason, which the agent's
   wait hears; it says when it was answered elsewhere or the agent's terminal ended. The page fills its pane, and what
   agents did there reads as words ("Clicked “Log In”", repeats folded) under links to its pages.
+- Browser: listing a container's sites no longer sets up a container that was never used (a new vault made four at
+  launch, and a fifth for agents 20 s later; now none).
 - iPhone: Download on a file or image opens the share sheet (Save Image, Save to Files) instead of showing the
   file in the app's own window with no way back.
 - iPhone: a voice note shows its words as they're said (through the server's cloud recognizer, Soniox, else the
@@ -245,15 +362,6 @@ its own number (`API_VERSION` in `core/version.ts`). The details are in git hist
   scrolls, while a sideways drag from the edge still opens the sidebar. A held link in a note shows its menu, held Back
   and Forward list where they go, and the held tabs button has New tab and Close tabs; small buttons and the Files
   page's More buttons are a finger's size.
-
-## 0.14.0 (2026-11-14)
-
-Research arrives: a layout for academics with References, Zotero and citations, and a web demo of its own. Settings are
-simpler, jobs can run in the cloud and go to a Mac when they need one, and sharing and connections go through Vaultite
-Cloud. Also an iPhone Downloads page and steadier typing there, block references and several cursors as in Obsidian,
-editable docked notes, search results in a note, pinned commands, previews in the slash menu and note switcher,
-Electron 45, and lighter, faster starts.
-
 - **Settings, simpler**: each page shows what most people set and folds the rest under Advanced (AI's agent files,
   inbox and MCP; Files' history, links and tabs), which search still opens. AI's Talk key model and its effort are one
   menu, as Claude's model picker is. Share & sync is redrawn: Vaultite Cloud's sign-in a row with its button, notes

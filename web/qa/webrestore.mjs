@@ -9,7 +9,7 @@ import fs from "node:fs"
 import http from "node:http"
 import os from "node:os"
 import path from "node:path"
-import { ROOT, qa, until, wait } from "./lib/qa.mjs"
+import { ROOT, pageNotLastScreen, qa, until, wait } from "./lib/qa.mjs"
 
 const { args: [VAULT], check, watch, done } = await qa(import.meta.url, { chrome: false })
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "vau-webrestore-"))
@@ -45,7 +45,7 @@ async function launch() {
     env: { ...process.env, VAULTITE_QUIET: process.env.SHOW ? "" : "1", VAULTITE_USER_DATA: path.join(TMP, "userData"), VAULTITE_LOCAL: path.join(TMP, "local") },
   })
   if (process.env.DEBUG) app.process().stderr.on("data", (d) => process.stderr.write(d)), app.process().stdout.on("data", (d) => process.stdout.write(d))
-  win = await app.firstWindow()
+  win = await pageNotLastScreen(app)
   watch(win, { console: true, fail: false })
 }
 const origin = () => new URL(win.url()).origin

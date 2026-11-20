@@ -17,7 +17,7 @@ export default async ($: VaultTest) => {
       at("http://127.0.0.1:3000/", "media") === "deny" && at("http://localhost:5000/", "clipboard-read") === "deny" && at("http://localhost:8793/", "media") === "allow")
     // What agents get of a page (electron/browser/axlines.ts, plugins/core/web-viewer/find.ts): a control that changed once,
     // new lines before gone ones; a new page's content without its navigation; a tree's lines with a word, and what holds them.
-    const { changes, mainLines } = await import("../../../electron/browser/axlines.ts")
+    const { changes, mainLines, oneLineLists, saysPending } = await import("../../../electron/browser/axlines.ts")
     const { within } = await import("../../../plugins/core/web-viewer/find.ts")
     const diff = changes(["- textbox \"Email\" [ref=e2]: old", "- text \"Saving\"", "- button \"Save\" [ref=e3]"], ["- textbox \"Email\" [ref=e2]: new", "  - button \"Save\" [ref=e3]", "- status \"Saved\""])
     check("browser agents: an act's diff says a control changed once, new lines first, a moved line not at all",
@@ -26,6 +26,27 @@ export default async ($: VaultTest) => {
     const withMain = ["- RootWebArea \"Shop\" [ref=e1]", "  - banner", "    - link \"Home\" [ref=e2]", "  - main", "    - heading \"Orders\"", "    - row: \"A-1\" | \"$5\""]
     check("browser agents: a new page's content is its main part, else the page without navigation, header and footer",
       JSON.stringify(mainLines(withMain)) === JSON.stringify(["- heading \"Orders\"", "- row: \"A-1\" | \"$5\""]) && JSON.stringify(mainLines(page)) === JSON.stringify(["- heading \"Orders\""]), [mainLines(withMain), mainLines(page)])
+    const oneLine = ["- RootWebArea \"Billing\"", "  - navigation", "    - link \"Home\" [ref=e1]", "  - main: heading \"Billing\" | \"Balance: $0.00\""]
+    const footed = ["- main", "  - heading \"Inbox\"", "  - sectionfooter: link \"Terms\" [ref=e2]", "  - article", "    - sectionfooter: \"Sent by Ben\""]
+    check("browser agents: a main of one line is the content, and the main's own footer is left out (an article's stays)",
+      JSON.stringify(mainLines(oneLine)) === JSON.stringify(["- main: heading \"Billing\" | \"Balance: $0.00\""])
+        && JSON.stringify(mainLines(footed)) === JSON.stringify(["- heading \"Inbox\"", "- article", "  - sectionfooter: \"Sent by Ben\""]), [mainLines(oneLine), mainLines(footed)])
+    const form = ["- form", "  - combobox \"Plan\" [ref=e1]: Pro", "    - option \"Free\" [ref=e2]", "    - option \"Pro\" [ref=e3] [selected]", "  - combobox \"Size\" [ref=e4]: S",
+      "    - option \"S\" [ref=e5] [selected]", "    - … 20 more options", "  - combobox \"Search\" [ref=e6]", "    - listbox", "      - option \"Recent\" [ref=e7]", "  - button \"Go\" [ref=e8]"]
+    check("browser agents: a <select>'s options are one line of names, a custom combobox's stay to click",
+      JSON.stringify(oneLineLists(form)) === JSON.stringify(["- form", "  - combobox \"Plan\" [ref=e1]: Pro", "    - options: \"Free\" | \"Pro\"", "  - combobox \"Size\" [ref=e4]: S",
+        "    - options: \"S\" | … 20 more", ...form.slice(7)]), oneLineLists(form))
+    check("browser agents: an act waits on a line saying the page is still at it, not on other text with an ellipsis",
+      ["+ text \"Saving…\"", "- main: heading \"Billing\" | \"Loading usage...\"", "- status: \"Uploading 2 files…\""].every(saysPending)
+        && !["- link \"Read more…\" [ref=e4]", "- text \"And then...\"", "- button \"Loading dock\" [ref=e5]", `- text "${"so much text before it ".repeat(4)}loading…"`].some(saysPending))
+    const { anywhere, HAS } = await import("../../../electron/browser/historyrows.ts")
+    const { DatabaseSync } = await import("node:sqlite")
+    const db = new DatabaseSync(":memory:")
+    db.exec("CREATE TABLE u (url TEXT)")
+    for (const u of ["https://GitHub.com/a", "https://shop.test/50%_off", "https://shop.test/50xxoff", "https://a.test/x\\y"]) db.prepare("INSERT INTO u VALUES (?)").run(u)
+    const like = (w: string) => db.prepare(`SELECT url FROM u WHERE ${HAS("url")}`).all(anywhere(w)).map((r) => String(r.url))
+    check("browser history: a word is found anywhere in any ASCII case, and %, _ and \\ in it are only themselves",
+      JSON.stringify([like("github"), like("50%_"), like("x\\y")]) === JSON.stringify([["https://GitHub.com/a"], ["https://shop.test/50%_off"], ["https://a.test/x\\y"]]), [like("github"), like("50%_"), like("x\\y")])
     const tree = ["- main", "  - form \"Settings\"", "    - textbox \"Email\" [ref=e2]", "    - button \"Save settings\" [ref=e3]", "  - link \"Help\" [ref=e4]"].join("\n")
     check("browser agents: snapshot --find keeps the lines with it and what they're in",
       within(tree, "save") === ["- main", "  - form \"Settings\"", "    - button \"Save settings\" [ref=e3]"].join("\n") && within(tree, "/e[24]\\]/") === ["- main", "  - form \"Settings\"", "    - textbox \"Email\" [ref=e2]", "  - link \"Help\" [ref=e4]"].join("\n"), within(tree, "save"))
@@ -137,5 +158,17 @@ export default async ($: VaultTest) => {
     stop()
     tell({ tab: 4 })
     check("desktop events reach a listener till it stops", JSON.stringify(heard) === JSON.stringify([["live:state", { tab: 3 }]]), heard)
+  }
+  {
+    const { pageFiles } = await import("../../../core/pagefiles.ts")
+    write("Attachments/Lighthouse.png", "PNGish")
+    const got = await pageFiles(["Attachments/Lighthouse.png"], (f) => vault.abs(f))
+    const why = (p: Promise<unknown>) => p.then(() => "", (e: Error) => e.message)
+    check("page upload: a vault file goes by its name and bytes; none, or one not there, says so",
+      got[0]?.name === "Lighthouse.png" && Buffer.from(got[0].data, "base64").toString() === "PNGish" &&
+      /needs `files`/.test(await why(pageFiles([], (f) => vault.abs(f)))) && /no file Attachments\/Nowhere.png/.test(await why(pageFiles("Attachments/Nowhere.png", (f) => vault.abs(f)))), got)
+    const [st, body] = await api("POST", "ops/companion.act", { action: "upload", app: "TextEdit", files: ["Attachments/Lighthouse.png"] })
+    const [st2, body2] = await api("POST", "ops/companion.act", { action: "upload", el: "e8" })
+    check("companion upload: only into a web page, and only with files", st === 400 && /web page's file input/.test(body.error) && st2 >= 400 && /needs `files`/.test(body2.error), [st, body, st2, body2])
   }
 }

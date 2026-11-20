@@ -20,11 +20,13 @@ import type { FileAnswer as Answered } from "./core/plugins.ts"
 import type { Live as LiveType } from "./core/live.ts"
 import type { Vault } from "./core/vault.ts"
 import { codeOf, errnoOf, isObj, messageOf } from "./core/values.ts"
+import { prefetchCode } from "./core/prefetch.ts"
 
 // Node's compile cache must be on before the app's modules load, so they're imported below rather than above.
-module.enableCompileCache?.()
 // Vault files are read on libuv's threads (core/vault.ts, readSoon): one iCloud holds keeps its thread, so have many.
 process.env.UV_THREADPOOL_SIZE ??= "128"
+module.enableCompileCache?.()
+prefetchCode(import.meta.dirname)
 startServerLog()
 const log = logger("vaultite")
 const DESKTOP = process.env.VAULTITE_DESKTOP === "1"
@@ -47,6 +49,7 @@ const { WebSocketServer } = await import("ws")
 const { decodePart: decode, jsonOf, open, queryOf } = await import("./core/app.ts")
 ;(await import("./core/update/graph.ts")).giveGraph(() => import("./core/update/closure.ts"))
 const { Live } = await import("./core/live.ts")
+const { readAhead } = await import("./core/readahead.ts")
 const { served: web } = await import("./core/webbuild.ts")
 const { flushKept } = await import("./core/kept.ts")
 const events = await import("./core/events.ts")
@@ -59,12 +62,15 @@ const { thumbOf } = await import("./core/thumbs.ts")
 const { tooBig } = await import("./core/filetypes.ts")
 const { runsCode } = await import("./core/opening.ts")
 const { contentType, enabled, FileAnswer, HTTPError, LOADED, LOCAL, matchSocket, ROOT, Text, VAULT_PATH } = await import("./core/plugins.ts")
+const KEPT_ASSETS = path.join(LOCAL, "web-assets")
+const { keepAssets, keptAsset } = await import("./core/keptassets.ts")
+web.on(() => void keepAssets(web.dist, KEPT_ASSETS).catch((e) => log.warn("couldn't keep the new build's assets", e)))
 const { fetchFromICloud, iCloud, keepDownloaded, slowReads } = await import("./core/vault.ts")
 const vaults = await import("./core/vaults.ts")
 const { answers, bequeath, claim, reclaim, servingKey } = await import("./core/serving.ts")
 const { attach, detach, inDesktop, LISTENING, onHost, onHostMessage } = await import("./core/desktopapp.ts")
 timing.mark("imports")
-void (await import("./core/running.ts")).running().then((r) => startup.runsCommit(r.startedOn), () => {})
+void (await import("./core/running.ts")).startedOn().then(startup.runsCommit, () => {})
 
 const HOST = process.env.HOST || "127.0.0.1"
 const PORT = Number(process.env.PORT || 8793)
@@ -84,7 +90,7 @@ if (servedBy) {
   process.exit(1)
 }
 let app: App, vault: Vault, live: LiveType
-const ready = open(VAULT_AT, { timing, watch: (v) => { live = new Live(v).start() } }).then((a) => {
+const ready = open(VAULT_AT, { timing, watch: (v) => { live = new Live(v).start() }, read: readAhead }).then((a) => {
   app = a
   vault = a.vault
   watch(live)
@@ -94,6 +100,7 @@ const ready = open(VAULT_AT, { timing, watch: (v) => { live = new Live(v).start(
   log.info(`vault read, plugins: ${app.plugins.map((p) => p.id).join(", ")}`)
   starting.end()
   startup.ready()
+  setTimeout(() => void keepAssets(web.dist, KEPT_ASSETS).catch((e) => log.warn("couldn't keep the build's assets", e)), 5000).unref()
   module.flushCompileCache?.() // Node writes the cache only on a normal exit, and a server ends by a signal
 }, (e) => {
   log.error("couldn't open the vault", e)
@@ -546,12 +553,17 @@ async function file(req: http.IncomingMessage, res: http.ServerResponse, url: UR
     if (fs.statSync(p).isDirectory()) p = path.join(p, "index.html")
     st = fs.statSync(p)
   } catch {
-    process.stderr.write(`"${req.method} ${url.pathname} HTTP/${req.httpVersion}" 404 -\n`)
-    return send(res, 404, "File not found", "text/plain", { "Cache-Control": "no-cache" })
+    const kept = path.dirname(p) === ASSETS ? keptAsset(KEPT_ASSETS, path.basename(p)) : null
+    if (!kept) {
+      process.stderr.write(`"${req.method} ${url.pathname} HTTP/${req.httpVersion}" 404 -\n`)
+      return send(res, 404, "File not found", "text/plain", { "Cache-Control": "no-cache" })
+    }
+    p = kept.file
+    st = kept.st
   }
   const type = contentType(p)
   const modified = st.mtime.toUTCString()
-  const headers: Record<string, string> = p.startsWith(ASSETS + path.sep)
+  const headers: Record<string, string> = p.startsWith(ASSETS + path.sep) || p.startsWith(KEPT_ASSETS + path.sep)
     ? { "Cache-Control": "public, max-age=31536000, immutable" }
     : { "Last-Modified": modified, "Cache-Control": type.startsWith("text/html") ? "no-cache" : "public, max-age=3600" }
   if (COMPRESSIBLE.test(type)) headers.Vary = "Accept-Encoding"
@@ -609,6 +621,8 @@ const deflating = new WebSocketServer({ noServer: true, maxPayload: 32 << 20,
   perMessageDeflate: { threshold: 256, zlibDeflateOptions: { level: 6 } } })
 const socketsFor = (req: http.IncomingMessage) => (overNetwork(req) ? deflating : sockets)
 
+const fromApp = (req: http.IncomingMessage) => app.trusts(req) || req.headers.origin !== undefined
+
 function refuse(socket: Duplex, status: number, message: string) {
   process.stderr.write(`WS refused: ${status} ${message}\n`)
   const reason = http.STATUS_CODES[status] ?? "Error"
@@ -639,8 +653,9 @@ server.on("upgrade", async (req: http.IncomingMessage, socket: Duplex, head: Buf
       })
     }
     const parts = url.pathname.split("/").filter(Boolean).slice(1).map(decode)
-    await app.syncPlugins()
-    await vault.synced()
+    const trusting = fromApp(req)
+    await app.syncPlugins({ trusting })
+    await vault.synced({ trusting })
     const hit = matchSocket(app.plugins, parts)
     if (!hit) return refuse(socket, 404, "not found")
     const [plugin, sock, wild] = hit

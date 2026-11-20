@@ -5,7 +5,7 @@ import path from "node:path"
 import type { MenuSnapshot } from "./menu.ts"
 import { MENU } from "./callwire.ts"
 import { stripKit, webHandlers } from "./web.ts"
-import { modeChanged, pageSafe, restartToUpdate, updatable, UPDATE_MODES, windowReady, type UpdateMode } from "./updates.ts"
+import { modeChanged, pageSafe, restartToUpdate, updatable, windowReady } from "./updates.ts"
 import { appHandlers } from "./apps.ts"
 import { dictationHandlers } from "./dictation.ts"
 import { setTranslucent } from "./translucency.ts"
@@ -16,25 +16,30 @@ import * as Setup from "./setup.ts"
 import { strings } from "../core/values.ts"
 import { MAC, WIN } from "./mainbase.ts"
 import { applyLights, bare, BUTTONS, CONTROLS_HEIGHT, LIGHTS, setLights } from "./titlebar.ts"
-import { buildMenu, find, helperPrefs, known, nameOf, remotes, save, setHelperPrefs, setKnown, setRemotes, setUpdates, updates, zoom } from "./vaultlist.ts"
+import { buildMenu, find, helperPrefs, known, learnNames, listedNames, remotes, save, setHelperPrefs, setKnown, setRemotes, setUpdates, UPDATE_MODES, updates, type UpdateMode, zoom } from "./vaultlist.ts"
 import { macPermissions, popouts, wins } from "./servers.ts"
-import { shellReady } from "./errors.ts"
+import { shellReady } from "./shellready.ts"
 import { focusedVault, manager, openVault, sandbox, showManager, waiting } from "./vaultwindow.ts"
 import { openRemote, probe, remoteWins } from "./remotewin.ts"
 import { folderName, handle, str, who } from "./handle.ts"
 import { pathDirs, serverUrl, showSetup, where } from "./setupwin.ts"
 import { copyIn, openFiles, pathKind, pickOutside, showFolder } from "./fromoutside.ts"
-import { applyDockIcon, DOCK_ICON, IMAGE_TYPES, zoomBy } from "./appmenu.ts"
+import { IMAGE_TYPES, zoomBy } from "./appmenu.ts"
+import { applyDockIcon, DOCK_ICON } from "./dockicon.ts"
+import { pageDrawn } from "./lastscreen.ts"
 import { logger } from "../core/log.ts"
 
 const log = logger("desktop")
 
-handle("vaults:list", (w) => ({
-  current: w?.vault.path ?? null, home: app.getPath("home"),
-  vaults: [...known].sort((a, b) => (b.last ?? 0) - (a.last ?? 0))
-    .map((v) => ({ path: v.path, name: nameOf(v.path), open: wins.has(v.path), ...(v.path === sandboxPath() ? { sandbox: true } : {}) }))
-    .concat(remotes.map((r) => ({ path: r.url, name: r.name, open: remoteWins.has(r.url), remote: true }))),
-}))
+handle("vaults:list", async (w) => {
+  await learnNames()
+  const local = [...known].sort((a, b) => (b.last ?? 0) - (a.last ?? 0)), names = listedNames(local.map((v) => v.path))
+  return {
+    current: w?.vault.path ?? null, home: app.getPath("home"),
+    vaults: local.map((v, i) => ({ path: v.path, name: names[i], open: wins.has(v.path), ...(v.path === sandboxPath() ? { sandbox: true } : {}) }))
+      .concat(remotes.map((r) => ({ path: r.url, name: r.name, open: remoteWins.has(r.url), remote: true }))),
+  }
+})
 handle("vaults:open", async (_w, p: string) => {
   if (remotes.some((r) => r.url === p)) return openRemote(p)
   await openVault(str(p))
@@ -112,6 +117,7 @@ handle("app:ready", (w) => {
   shellReady(w)
   return w.queue.splice(0)
 })
+handle("app:drawn", (w) => { if (w) pageDrawn(w.win) })
 handle("app:update-restart", () => restartToUpdate(true))
 handle("app:updates", () => ({ mode: updates, available: updatable() }))
 handle("app:updates-set", (_w, mode: UpdateMode) => {

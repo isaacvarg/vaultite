@@ -3,20 +3,28 @@ import fs from "node:fs"
 import { createRequire } from "node:module"
 import os from "node:os"
 import path from "node:path"
+import { z } from "zod"
 import { logger } from "./log.ts"
 import { messageOf } from "./values.ts"
 
 const log = logger("headless")
 
-/** Chrome to drive: VAULTITE_CHROME, Playwright's Chromium (a checkout's), Google Chrome, Linux's Chromium. Not the
- *  installed Chrome first: a headless one left running is what macOS brings forward when it's opened. */
+/** VAULTITE_CHROME, Playwright's Chromium, then an installed Chrome or Edge: not first, as macOS brings forward a headless one
+ *  left running; but first on Windows on Arm, where Playwright's is x64, whose sandboxed pages crash under emulation. */
 export function chromePath() {
   const bundled = () => { try { return createRequire(import.meta.url)("playwright-core").chromium.executablePath() as string } catch { return undefined } }
-  return [process.env.VAULTITE_CHROME, bundled(), "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/snap/bin/chromium"].find((p) => p && fs.existsSync(p)) ?? null
+  const installed = ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    ...windowsBrowsers(), "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium", "/usr/bin/chromium-browser", "/snap/bin/chromium"]
+  const emulated = process.platform === "win32" && process.arch === "arm64"
+  return [process.env.VAULTITE_CHROME, ...(emulated ? [...installed, bundled()] : [bundled(), ...installed])].find((p) => p && fs.existsSync(p)) ?? null
+}
+function windowsBrowsers() {
+  if (process.platform !== "win32") return []
+  const roots = [process.env.ProgramFiles, process.env["ProgramFiles(x86)"], process.env.LOCALAPPDATA].filter((r) => r !== undefined)
+  return [...roots.map((r) => path.join(r, "Google", "Chrome", "Application", "chrome.exe")), ...roots.map((r) => path.join(r, "Microsoft", "Edge", "Application", "msedge.exe"))]
 }
 
-export type Cdp = { send: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>; on: (method: string, f: (p: Record<string, unknown>) => void) => void; close: () => void }
+export type Cdp = { send: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>; on: (method: string, f: (p: Record<string, unknown>) => void) => () => void; close: () => void }
 async function cdp(wsUrl: string): Promise<Cdp> {
   const ws = new WebSocket(wsUrl)
   await new Promise<void>((ok, fail) => { ws.onopen = () => ok(); ws.onerror = () => fail(new Error("couldn't reach the headless browser")) })
@@ -27,10 +35,20 @@ async function cdp(wsUrl: string): Promise<Cdp> {
     if (m.id !== undefined) { const w = waits.get(m.id); waits.delete(m.id); if (m.error) w?.fail(new Error(m.error.message)); else w?.ok(m.result ?? {}) }
     else if (m.method) for (const f of subs.get(m.method) ?? []) f(m.params ?? {})
   }
-  ws.onclose = () => { for (const w of waits.values()) w.fail(new Error("the headless browser closed")); waits.clear() }
+  let gone: Error | null = null
+  const end = (e: Error) => { gone ??= e; for (const w of waits.values()) w.fail(gone); waits.clear() }
+  ws.onclose = () => end(new Error("the headless browser closed"))
+  const on: Cdp["on"] = (method, f) => {
+    subs.set(method, [...(subs.get(method) ?? []), f])
+    return () => subs.set(method, (subs.get(method) ?? []).filter((g) => g !== f))
+  }
+  on("Inspector.targetCrashed", () => end(new Error("the headless browser's page crashed")))
   return {
-    send: (method, params = {}) => new Promise((ok, fail) => { const n = ++id; waits.set(n, { ok, fail }); ws.send(JSON.stringify({ id: n, method, params })) }),
-    on: (method, f) => subs.set(method, [...(subs.get(method) ?? []), f]),
+    send: (method, params = {}) => new Promise((ok, fail) => {
+      if (gone) return fail(gone)
+      const n = ++id; waits.set(n, { ok, fail }); ws.send(JSON.stringify({ id: n, method, params }))
+    }),
+    on,
     close: () => ws.close(),
   }
 }
@@ -75,10 +93,57 @@ async function launch(size: { width: number; height: number }, signal: AbortSign
     }
     if (!tab) throw new Error("Chrome opened no page")
     page = await cdp(tab.webSocketDebuggerUrl)
+    await page.send("Inspector.enable")
     return { page, stop, quit }
   } catch (e) {
     await quit()
     throw e
+  }
+}
+
+const Navigated = z.object({ frame: z.object({ id: z.string(), loaderId: z.string(), parentId: z.string().optional() }) })
+const Started = z.object({ frameId: z.string(), loaderId: z.string() })
+const Stopped = z.object({ frameId: z.string() })
+const Navigation = z.object({ loaderId: z.string().optional(), errorText: z.string().optional() })
+
+export async function open(page: Cdp, url: string, o: { ms?: number; loadMs?: number } = {}): Promise<void> {
+  const ms = o.ms ?? 30_000, loadMs = o.loadMs ?? 15_000
+  const started = new Map<string, string>(), committed = new Set<string>(), dropped = new Set<string>(), loaded = new Set<string>()
+  let last: string | undefined, ours: string | undefined, crashed = false, settle = () => {}
+  const offs = [
+    page.on("Page.frameStartedNavigating", (e) => { const s = Started.safeParse(e).data; if (s) started.set(s.loaderId, s.frameId); settle() }),
+    page.on("Page.frameNavigated", (e) => { const f = Navigated.safeParse(e).data?.frame; if (f && !f.parentId) { committed.add(f.loaderId); last = f.loaderId } settle() }),
+    page.on("Page.loadEventFired", () => { if (last) loaded.add(last); settle() }),
+    page.on("Page.frameStoppedLoading", (e) => {
+      const frame = Stopped.safeParse(e).data?.frameId
+      for (const [id, f] of started) if (f === frame && !committed.has(id)) dropped.add(id)
+      settle()
+    }),
+    page.on("Inspector.targetCrashed", () => { crashed = true; settle() }),
+  ]
+  const timers: ReturnType<typeof setTimeout>[] = []
+  try {
+    const done = new Promise<void>((ok, fail) => {
+      let shown = false
+      settle = () => {
+        if (crashed) fail(new Error(`couldn't open ${url}: the page crashed`))
+        if (!ours) return
+        if (loaded.has(ours)) ok()
+        else if (dropped.has(ours)) fail(new Error(`couldn't open ${url}: the browser dropped it before it showed`))
+        else if (committed.has(ours) && !shown) { shown = true; timers.push(setTimeout(ok, loadMs)) }
+      }
+      timers.push(setTimeout(() => { if (!shown) fail(new Error(`couldn't open ${url}: it didn't show in ${ms / 1000} s`)) }, ms))
+    })
+    done.catch(() => {})
+    const nav = Navigation.parse(await page.send("Page.navigate", { url }))
+    if (nav.errorText) throw new Error(`couldn't open ${url}: ${nav.errorText}`)
+    if (!nav.loaderId) return
+    ours = nav.loaderId
+    settle()
+    await done
+  } finally {
+    for (const t of timers) clearTimeout(t)
+    for (const off of offs) off()
   }
 }
 

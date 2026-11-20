@@ -2,6 +2,7 @@ import { Fragment, lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect
 import { createPortal } from "react-dom"
 import { BookOpen, Folder, FolderInput, Smile, Trash2, type LucideIcon } from "lucide-react"
 import { coarse } from "@/core/haptics"
+import { releaseFirstScreen, useFirstScreenHold } from "@/core/firstscreen"
 import { Banner } from "@/components/Banner"
 import { menuFor, menuOnCard } from "@/components/ContextMenu"
 import { copyToVault, copyToVaultItem, folderMenu, revealItem } from "@/components/FileActions"
@@ -124,7 +125,7 @@ const Title = memo(function Title({ path, editable, sheet, focus, settle, mode, 
         if (e.key === "Escape") { setV(name); e.currentTarget.blur() }
       }}
       className="block w-full resize-none overflow-hidden bg-transparent outline-none placeholder:text-muted-foreground" />
-      {typing && <Suspense><TitleKeys field={ref} back={v !== name ? () => setV(name) : undefined} next={toText} /></Suspense>}</h1>
+      {typing && <Suspense fallback={<Arriving />}><TitleKeys field={ref} back={v !== name ? () => setV(name) : undefined} next={toText} /></Suspense>}</h1>
   )
 })
 
@@ -282,6 +283,7 @@ function TextFile({ store, path, pane, docked }: { store: Store; path: string; p
   const { value: file, error } = read
   const notText = error !== undefined && NOT_TEXT.test(String(error))
   const missing = !notText && ((error !== undefined && gone(error)) || (!!file && goneFrom === file))
+  useFirstScreenHold(`file:${path}`, missing || notText || error !== undefined)
   useVaultChange(() => { if (error !== undefined || missing) read.retry() }, [path])
   const { disabled } = usePrefs()
   const padded = (node: ReactNode) => (pane && fillsPane(path, disabled) ? <PaneScroll>{node}</PaneScroll> : node)
@@ -846,6 +848,8 @@ function Loaded({ store, initial, pane, docked, onGone }: { store: Store; initia
       },
     })
   }, [droppable])
+  const editing = !(board && pageView) && !drawing && !((notebook || json) && !source)
+  useEffect(() => { if (!editing) releaseFirstScreen(`file:${path}`) }, [editing, path])
   const outsideMenu = outside ? (e: MouseEvent) => {
     if (!closestOf(e.target, ".cm-content, input, textarea")) menuFor(() => [copyToVaultItem(path), ...revealItem(path, true)])(e)
   } : undefined
@@ -882,12 +886,13 @@ function Loaded({ store, initial, pane, docked, onGone }: { store: Store; initia
               <JsonView text={cur.current.body} editable={shown === "live" && !ro}
                 onChange={(text) => { cur.current = { fm: "", body: text }; redraw(); changed() }} />
             ) : (
-              <Editor key={source ? `${path}:source` : `${path}:text${fmText ? ":fm" : ""}`} doc={full()} keep={path} config={config} {...wiring} label={stem(path)}
+              <Editor key={source ? `${path}:source` : `${path}:text${fmText ? ":fm" : ""}`} waiting={<Arriving className="min-h-40" />} doc={full()} keep={path} config={config} {...wiring} label={stem(path)}
                 docPath={isMd(path) ? path : undefined} extensionsPath={path} onAttach={outside ? undefined : attach}
                 {...(source ? { editable: !ro, source: true, numbered: true, code: strict ? "json" : format?.code, language: code ? path : format?.source ? `source.${format.source}` : undefined }
                   : { frontmatter: !fmText, title: titled && !page ? stem(path) : undefined, editable: shown === "live" && !ro, placeholderText: shown === "read" ? "" : "Start writing", numbered: shown !== "read",
                     onUndoFrontmatter: () => revealProps(article.current) })}
                 onReady={(api) => {
+                  releaseFirstScreen(`file:${path}`)
                   const me = { api, source }
                   editor.current = me
                   ready(api, source); saver.reshow(); if (kept?.write) toText()

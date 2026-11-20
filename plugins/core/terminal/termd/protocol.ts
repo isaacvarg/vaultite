@@ -1,8 +1,8 @@
 import { z } from "zod"
 import type { Said as Told } from "../osc7501.ts"
 
-/** 1 ptyd.ts; 2 termd with xterm.js; 3 before pictures; 4 screens on its loop; 5 screens' pages unzeroed (vt/patches/3). */
-export const PROTOCOL = 6
+/** 1 ptyd.ts; 2 termd with xterm.js; 3 before pictures; 4 screens on its loop; 5 pages unzeroed; 6 mid-sequence snapshots. */
+export const PROTOCOL = 7
 
 const Meta = z.record(z.string(), z.string())
 const Id = z.string().min(1)
@@ -80,7 +80,7 @@ export type Params<O extends Op> = Omit<Extract<z.input<typeof Request>, { op: O
 const Empty: z.ZodType<{}> = z.object({})
 const InfoAnswer = z.object({ info: Info })
 const answers = {
-  hello: z.object({ v: z.number(), pid: z.number(), file: z.string(), stale: z.boolean(), pictures: z.boolean().optional() }),
+  hello: z.object({ v: z.number(), pid: z.number(), file: z.string(), stale: z.boolean(), pictures: z.boolean().optional(), handedOver: z.boolean().optional() }),
   subscribe: Empty,
   "status-drop": Empty,
   access: z.object({ ok: z.boolean(), code: z.string().optional() }),
@@ -102,6 +102,8 @@ const answers = {
 export type Answer<O extends Op> = z.infer<(typeof answers)[O]>
 type AnswerSchemas = { [O in Op]: z.ZodType<Answer<O>> }
 export const Answers: AnswerSchemas = answers
+
+export const oldSocket = (socket: string, pid: number) => `${socket}.old-${pid}`
 
 /** `retiring`: this server's files are gone and it's ending, so the next one should be asked. */
 export type FailureCode = "retiring"

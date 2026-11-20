@@ -1,5 +1,5 @@
 import { z } from "zod"
-import { type OpCtx, OpError } from "../../../core/plugins.ts"
+import { type OpCtx, OpError, pageFiles, vaultPath } from "../../../core/plugins.ts"
 import { paneSource } from "../../../core/desktop/places.ts"
 import { doneText, effectOf, stepOf } from "./takeover.ts"
 import { check as checkOn, listView, parseCondition, thingFrom } from "../../../core/desktop/uimodel.ts"
@@ -108,7 +108,7 @@ async function actInApp(ctx: OpCtx, name: string, ui: string, find: string, acti
   } finally { done() }
 }
 
-const ACTS = ["click", "dblclick", "rightclick", "hover", "fill", "type", "press", "check", "uncheck", "select", "scroll", "focus", "expand", "collapse"]
+const ACTS = ["click", "dblclick", "rightclick", "hover", "fill", "type", "press", "check", "uncheck", "select", "upload", "scroll", "focus", "expand", "collapse"]
 type ScreenParams = { [K in "action" | "ax" | "sx" | "sy" | "value" | "key" | "direction" | "doing" | "app" | "find" | "role" | "ask" | "pane" | "el" | "as"]?: unknown }
 function onScreen(p: ScreenParams, name: string) {
   if (str(p.ax) || p.sx !== undefined || str(p.app)) return true
@@ -149,6 +149,7 @@ or keys pause a step that needs them, a click or Esc stops it. Answers the eleme
 
   vau companion act --pane t5x1 click --el e12
   vau companion act --pane t5x1 fill --el e5 --value "alice@example.com"
+  vau companion act --pane t5x1 upload --el e8 --files "Attachments/Lighthouse.png"
   vau companion act click --ax a3 --ask "Want me to turn on dark mode?"
   vau companion act fill --ax a5 --value "Lighthouse" --doing "Typing the title"
   vau companion act press --key cmd+s
@@ -164,10 +165,12 @@ or keys pause a step that needs them, a click or Esc stops it. Answers the eleme
     ax: PLACE.ax, sx: PLACE.sx, sy: PLACE.sy, ask: { type: "string", description: "in another app: the line offering it, when they haven't said yes yet (Want me to...?)" },
     doing: { type: "string", description: "in another app: a few words by your cursor for this step (Typing the title); else made from the step" },
     value: { type: "string", description: "the text to fill or type, or the option to select (scroll: up or down)" }, key: { type: "string", description: "the key to press (Enter, Tab, Escape; in another app with modifiers: cmd+s)" },
-    direction: { type: "string", enum: ["up", "down"], description: "which way to scroll" }, as: AS },
+    direction: { type: "string", enum: ["up", "down"], description: "which way to scroll" }, as: AS,
+    files: { type: "array", items: { type: "string" }, description: "upload, in a web page: into its file input or the button that picks one (el), vault paths (Attachments/shot.png) or absolute paths on this machine" } },
   args: ["action", "value"],
   run: async (p, ctx) => {
-    const name = who(p)
+    const name = who(p), files = p.action === "upload" ? await pageFiles(p.files, (f) => plugin.vault.abs(vaultPath(f)), ctx.refusal) : undefined
+    if (files && (str(p.ui) || str(p.app) || str(p.ax) || p.sx !== undefined)) throw new OpError("upload is for a web page's file input: --pane and --el")
     if (str(p.ui)) return actInApp(ctx, name, str(p.ui), str(p.find), str(p.action), str(p.role))
     const ask = askOf(name), own = str(p.ax) && ask && !awayIn([ask]) ? nearBy.get(key(name))?.find((e) => e.id === str(p.ax)) : undefined
     if (own) return actInApp(ctx, name, own.ui ?? "", own.ui ? "" : own.label, str(p.action), own.ui ? "" : own.role)
@@ -182,7 +185,7 @@ or keys pause a step that needs them, a click or Esc stops it. Answers the eleme
     did(name, "act")
     const done = writingAt(name, str(p.el) ? await resolve({ pane: id, el: str(p.el) }, name).catch(() => ({ pane: id })) : null)
     try {
-      const r = Acted.parse(await plugin.desktop("agent:act", t.tab, { action: p.action, ref: str(p.el) || undefined, value: p.value, key: p.key, direction: p.direction, diff: "summary" },
+      const r = Acted.parse(await plugin.desktop("agent:act", t.tab, { action: p.action, ref: str(p.el) || undefined, value: p.value, key: p.key, direction: p.direction, files, diff: "summary" },
         { name, session: "", task: "", summary: "", remote: false }).catch((e) => { throw new OpError(messageOf(e), 409) }))
       return { pane: id, ...r }
     } finally { done() }

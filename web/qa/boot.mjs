@@ -19,8 +19,8 @@ async function serve(vault, local) {
     cwd: ROOT, stdio: ["ignore", "ignore", "pipe"],
     env: { ...process.env, PORT: String(port), HOST: "127.0.0.1", VAULTITE_VAULT: vault, VAULTITE_LOCAL: local, ...(github ? { VAULTITE_GITHUB: github, VAULTITE_BUNDLES: bundles } : {}) },
   })
-  servers.push({ server, port })
   let said = ""
+  servers.push({ server, port, said: () => said })
   server.stderr.on("data", (b) => { said = (said + b).slice(-2000) })
   const base = `http://127.0.0.1:${port}/`
   let up = false
@@ -68,12 +68,17 @@ async function visit(base, prefix = "") {
     const ctx = await browser.newContext(opts)
     const page = await ctx.newPage()
     page.setDefaultNavigationTimeout(SLOW)
-    const errors = []
+    const errors = [], loading = new Set()
     page.on("pageerror", (e) => errors.push(e.stack || e.message))
+    page.on("request", (q) => loading.add(q.url()))
+    for (const done of ["requestfinished", "requestfailed"]) page.on(done, (q) => loading.delete(q.url()))
     const routes = ["", "#plugins", "#settings", ...(note ? [`#view/files/file/${encodeURIComponent(`${note}.md`)}`] : [])]
     for (const r of routes) {
       doing = `${prefix}${name}: ${r || "first page"}`
-      await page.goto(base + r)
+      await page.goto(base + r).catch((e) => {
+        const said = servers.find((x) => base.includes(`:${x.port}/`))?.said() ?? ""
+        throw new Error(`${e.message}\nstill loading: ${[...loading].join(", ") || "nothing"}\nits server's last words:\n${said}`)
+      })
       const drawn = await page.waitForFunction(() => document.getElementById("vau-boot-error") || document.querySelector("#root > *"), null, { timeout: SLOW }).catch(() => null)
       await wait(1500)
       const screen = await page.evaluate(() => document.getElementById("vau-boot-error")?.innerText ?? null)

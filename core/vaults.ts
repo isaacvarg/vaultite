@@ -5,8 +5,9 @@ import { z } from "zod"
 import { listOf, readJson } from "./jsonfile.ts"
 import { HTTPError, LOCAL } from "./plugins.ts"
 import { readText, writeAtomic } from "./vault.ts"
+import { listNames, nicknameAt } from "./vaultname.ts"
 
-const Known = z.looseObject({ path: z.string(), name: z.string() })
+const Known = z.object({ path: z.string() })
 type Known = z.infer<typeof Known>
 const Saved = z.looseObject({ current: z.string().optional().catch(undefined), vaults: listOf(Known).optional() })
 type Saved = z.infer<typeof Saved>
@@ -22,8 +23,6 @@ function load(): Saved {
 function save(s: Saved) {
   writeAtomic(FILE(), JSON.stringify(s, null, 2) + "\n")
 }
-
-const nameOf = (p: string) => path.basename(p) || p
 
 export function current(fallback: string) {
   const c = load().current
@@ -75,7 +74,13 @@ function safe(p: unknown, { vault = false } = {}) {
 }
 
 function remember(list: Known[], p: string) {
-  return [{ path: p, name: nameOf(p) }, ...list.filter((v) => v.path !== p)]
+  return [{ path: p }, ...list.filter((v) => v.path !== p)]
+}
+
+async function named(list: Known[]) {
+  const nicknames = await Promise.all(list.map((v) => nicknameAt(v.path)))
+  const names = listNames(list.map((v, i) => ({ path: v.path, nickname: nicknames[i] ?? "" })))
+  return list.map((v, i) => ({ path: v.path, name: names[i] }))
 }
 
 export type Switch = (p: string) => Promise<void>
@@ -86,7 +91,7 @@ export async function handle(method: string, parts: string[], query: Record<stri
   const route = parts.slice(1).join("/")
   const s = load()
   const list = s.vaults ?? []
-  const known = () => ({ current: serving, home: HOME, vaults: list.some((v) => v.path === serving) ? list : remember(list, serving) })
+  const known = async () => ({ current: serving, home: HOME, vaults: await named(list.some((v) => v.path === serving) ? list : remember(list, serving)) })
   if (route === "" && method === "GET") return known()
   if (route === "" && method === "DELETE") {
     const p = query.path ?? body.path
